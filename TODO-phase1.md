@@ -68,13 +68,13 @@ newly-created and modified files as one atomic commit.
 
 ### 1.1 Module and tooling
 
-- [ ] `go mod init github.com/xdg-go/mongoqueue`; set `go 1.26`
-- [ ] Add `go.mongodb.org/mongo-driver/v2` dependency
-- [ ] Placeholder `doc.go` with package comment (one-paragraph model summary;
+- [x] `go mod init github.com/xdg-go/mongoqueue`; set `go 1.26`
+- [x] Add `go.mongodb.org/mongo-driver/v2` dependency
+- [x] Placeholder `doc.go` with package comment (one-paragraph model summary;
       full godoc is Phase 7)
-- [ ] Makefile: `test` (`go test ./...`), `vet` (`go vet ./...`), `lint`
+- [x] Makefile: `test` (`go test ./...`), `vet` (`go vet ./...`), `lint`
       (`golangci-lint run`), `all` = vet + lint + test
-- [ ] **Test**: `go test ./...` runs and passes with a trivial placeholder
+- [x] **Test**: `go test ./...` runs and passes with a trivial placeholder
       test (deleted in 1.2)
 
 ### 1.2 Mongo test harness and CI
