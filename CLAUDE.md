@@ -50,8 +50,12 @@ the caller above the primitive.
   contract, correctness invariants, rejected alternatives. Specifies *what* and
   *why*, not *how*.
 - [docs/mongodb-go-library-design.md](docs/mongodb-go-library-design.md) --
-  Go-specific decisions for the MongoDB implementation: the envelope/body split,
-  BSON-native body storage, the `Claim` signature, and exported-field rationale.
+  the Go API and MongoDB storage design: the envelope/body split, BSON-native
+  body storage, the `Job` record, the `Enqueue`/`Claim`/`Cancel` API, and open
+  questions.
+- [docs/rejected-designs.md](docs/rejected-designs.md) -- Go/Mongo design
+  alternatives considered and rejected (body typing options, body storage
+  forms), with reasoning.
 
 **Always keep this index current: whenever a file is added to or removed from
 `docs/`, update the links above in the same change.**
