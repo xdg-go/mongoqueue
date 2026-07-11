@@ -62,6 +62,9 @@ the caller above the primitive.
 - [docs/rejected-designs.md](docs/rejected-designs.md) -- Go/Mongo design
   alternatives considered and rejected (body typing options, body storage
   forms, weight resolver, automatic index creation), with reasoning.
+- [docs/implementation-plan.md](docs/implementation-plan.md) -- phased,
+  iterative build order with per-phase tasks, test tasks, and verification
+  checklist; per-phase TODO files are expanded from it just-in-time.
 
 **Always keep this index current: whenever a file is added to or removed from
 `docs/`, update the links above in the same change.**
