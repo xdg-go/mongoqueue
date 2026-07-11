@@ -1,0 +1,409 @@
+# golangci-lint v2 configuration for cloister
+#
+# Philosophy: Aggressive linting with low false-positive rates. These rules
+# catch the structural problems AI agents consistently produce: monolithic
+# functions, bare error returns, god interfaces, global state, and poor naming.
+#
+# Usage: golangci-lint run ./...
+# Requires: golangci-lint v2.0+
+
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+output:
+  formats:
+    text:
+      path: stdout
+  sort-order:
+    - linter
+    - severity
+    - file
+
+linters:
+  default: none
+  enable:
+    # --- Error handling (highest value) ---
+    - errcheck        # Unchecked errors — the #1 agent bug
+    - errorlint       # Correct error wrapping/comparison patterns
+    - wrapcheck       # Force error wrapping at package boundaries
+    - nilerr          # Catches `if err != nil { return nil }` bugs
+    - nilnil          # Catches `return nil, nil` — ambiguous success/failure
+
+    # --- Function complexity ---
+    - funlen          # Max function length
+    - cyclop          # Cyclomatic complexity
+    - gocognit        # Cognitive complexity (catches deeply nested logic)
+
+    # --- Code structure ---
+    - gocritic        # Broad set of opinionated checks
+    - revive          # Configurable metalinter (replaces golint)
+    - unparam         # Unused function parameters
+    - govet           # Go vet — catches subtle bugs
+    - staticcheck     # The gold standard static analyzer
+    - unused          # Dead code detection
+    - ineffassign     # Dead assignment detection
+    - exhaustive      # Exhaustive switch/map on enum types
+    - reassign        # Detects reassignment of package-level vars from other packages
+    - modernize       # Suggests modern Go idioms
+
+    # --- Style and naming ---
+    - misspell        # Typos in comments/strings
+    - dupword         # Catches repeated words ("the the") in comments/strings
+    - predeclared     # Shadowing of predeclared identifiers (e.g., `error`, `len`)
+
+    # --- Security/correctness ---
+    - gosec           # Security-oriented checks
+    - bodyclose       # Unclosed HTTP response bodies
+    - noctx           # HTTP requests without context
+
+    # --- Concurrency ---
+    - copyloopvar     # Loop variable capture bugs (pre-Go 1.22 patterns)
+
+    # --- Lint hygiene ---
+    - nolintlint      # Require explanation and specific linter for //nolint directives
+
+    # --- Project conventions ---
+    - forbidigo       # Forbid fmt.Print* and log.* outside designated packages
+    - depguard        # Deny dangerous/deprecated imports
+    - gomoddirectives # Prevent local replace directives in go.mod
+
+  exclusions:
+    rules:
+      # Test files get relaxed rules.
+      - path: _test\.go
+        linters:
+          - funlen
+          - cyclop
+          - gocognit
+          - wrapcheck
+          - errcheck
+          - gosec
+          - bodyclose
+          - forbidigo
+          - depguard
+          - nilnil
+
+      # Package names like "token" and "version" are reasonable for internal
+      # packages despite conflicting with stdlib (go/token, go/version).
+      - linters:
+          - revive
+        text: "avoid package names that conflict"
+
+      # Generated code — skip entirely.
+      - path: \.pb\.go$
+        linters:
+          - all
+      - path: _gen\.go$
+        linters:
+          - all
+      - path: mock_.*\.go$
+        linters:
+          - all
+
+      # Allow fmt.Print* in designated output packages
+      - path: internal/term/
+        linters:
+          - forbidigo
+      - path: internal/prompt/
+        linters:
+          - forbidigo
+      - path: internal/audit/
+        linters:
+          - forbidigo
+
+    paths:
+      - vendor
+      - third_party
+      - testdata
+      - internal/generated
+
+  settings:
+    # -------------------------------------------------------------------------
+    # Error handling
+    # -------------------------------------------------------------------------
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+      exclude-functions:
+        # fmt output — errors not actionable
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Print
+        - fmt.Printf
+        - fmt.Println
+        # Interface contracts that don't error in practice
+        - (hash.Hash).Write
+        - (io.StringWriter).WriteString
+        # Cleanup/teardown — errors not actionable
+        - (io.Closer).Close
+        - (*os.File).Close
+        - os.Remove
+        - os.RemoveAll
+        - (*os.Process).Kill
+        - (*net.Listener).Close
+        # Shutdown — nothing actionable if log close fails
+        - github.com/xdg/cloister/internal/clog.Close
+
+    errorlint:
+      errorf: true
+      errorf-multi: true
+      asserts: true
+      comparison: true
+
+    wrapcheck:
+      ignore-sigs:
+        - .Errorf(
+        - errors.New(
+        - errors.Unwrap(
+        - errors.Join(
+        - .Wrap(
+        - .Wrapf(
+        - .WithMessage(
+        - .WithMessagef(
+        - .WithStack(
+      ignore-package-globs:
+        - github.com/xdg/cloister/*
+
+    # -------------------------------------------------------------------------
+    # Function complexity
+    # -------------------------------------------------------------------------
+    funlen:
+      lines: 80
+      statements: 50
+      ignore-comments: true
+
+    cyclop:
+      max-complexity: 15
+      package-average: 5.0
+
+    gocognit:
+      min-complexity: 20
+
+    # -------------------------------------------------------------------------
+    # Code structure and style
+    # -------------------------------------------------------------------------
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+        - opinionated
+      disabled-checks:
+        - hugeParam      # Agents shouldn't be forced to use pointers everywhere
+
+    revive:
+      severity: warning
+      confidence: 0.8
+      rules:
+        # --- Naming ---
+        - name: exported
+          severity: warning
+          arguments:
+            - "checkPrivateReceivers"
+            - "sayRepetitiveInsteadOfStutters"
+        - name: package-comments
+          severity: warning
+        - name: var-naming
+          severity: warning
+        - name: receiver-naming
+          severity: warning
+        - name: unexported-return
+          severity: warning
+
+        # --- Function signatures ---
+        - name: argument-limit
+          severity: warning
+          arguments: [5]
+        - name: function-result-limit
+          severity: warning
+          arguments: [3]
+
+        # --- Context parameter position ---
+        - name: context-as-argument
+          severity: error
+          arguments:
+            - allowTypesBefore: ""
+
+        # --- Structure ---
+        - name: unused-parameter
+          severity: warning
+        - name: blank-imports
+          severity: warning
+        - name: context-keys-type
+          severity: warning
+        - name: early-return
+          severity: warning
+        - name: unnecessary-stmt
+          severity: warning
+        - name: deep-exit
+          severity: warning
+        - name: superfluous-else
+          severity: warning
+        - name: confusing-naming
+          severity: warning
+        - name: modifies-parameter
+          severity: warning
+        - name: confusing-results
+          severity: warning
+        - name: defer
+          severity: warning
+          arguments:
+            - ["call-chain", "loop", "method-call", "recover", "return"]
+        - name: range-val-in-closure
+          severity: warning
+        - name: waitgroup-by-value
+          severity: error
+        - name: identical-branches
+          severity: warning
+        - name: bool-literal-in-expr
+          severity: warning
+
+        # --- Explicitly disabled ---
+        - name: add-constant
+          disabled: true   # Too noisy — magic number detection
+        - name: max-public-structs
+          disabled: true   # Not useful for agents
+
+    unparam:
+      check-exported: false  # Only flag unexported — exported may satisfy interfaces
+
+    staticcheck:
+      checks:
+        - "all"
+
+    govet:
+      enable:
+        - nilness       # Redundant/impossible nil comparisons
+        - unusedwrite   # Writes to variables that are never read
+
+    misspell:
+      locale: US
+
+    exhaustive:
+      default-signifies-exhaustive: true  # `default:` case counts as exhaustive
+
+    # -------------------------------------------------------------------------
+    # Security
+    # -------------------------------------------------------------------------
+    gosec:
+          # Allowlist: only these rules run. New gosec rules require explicit opt-in.
+          # Verified against: gosec -h (2026-02-22)
+          # Review on each golangci-lint upgrade for new rules.
+          includes:
+            # --- Credentials & secrets ---
+            - G101  # Hardcoded credentials
+
+            # --- Network exposure ---
+            - G102  # Bind to all interfaces
+            - G106  # SSH InsecureIgnoreHostKey
+            - G112  # Missing ReadHeaderTimeout
+
+            # --- Injection & overflow ---
+            - G103  # Audit unsafe block usage
+            - G109  # strconv.Atoi → int32/int16 overflow
+            - G110  # io.Copy without limit (decompression bomb)
+            - G111  # http.Dir('/') serving entire filesystem
+            - G201  # SQL injection via fmt.Sprintf
+            - G202  # SQL injection via string concat
+            - G203  # Unescaped data in HTML templates
+
+            # --- Filesystem ---
+            - G301  # Directory perms too broad
+            - G302  # File perms too broad (create/chmod)
+            - G303  # Predictable temp file path
+            - G305  # Zip slip (path traversal on extract)
+            - G306  # File write perms too broad
+            - G307  # Poor perms with os.Create
+
+            # --- Cryptography (usage) ---
+            - G401  # Weak hash (MD5/SHA1)
+            - G402  # Bad TLS config
+            - G403  # Short RSA key (<2048)
+            - G405  # DES/RC4 usage
+            - G406  # Deprecated MD4/RIPEMD160
+            - G407  # Hardcoded IV/nonce
+
+            # --- Cryptography (imports) ---
+            # Redundant with G4xx for call sites, but enforces a clean policy:
+            # if crypto/md5 or crypto/sha1 appear in the codebase, it's a bug.
+            # Use xxhash (github.com/cespare/xxhash/v2) for non-crypto hashing.
+            - G501  # crypto/md5
+            - G502  # crypto/des
+            - G503  # crypto/rc4
+            - G504  # net/http/cgi (no G4xx counterpart — import-only rule)
+            - G505  # crypto/sha1
+            - G506  # golang.org/x/crypto/md4
+            - G507  # golang.org/x/crypto/ripemd160
+
+          config:
+            # Permission thresholds (RULES.md format: 0o prefix octal strings)
+            G301: "0o750"   # Directories: owner rwx, group rx
+            G302: "0o640"   # Files: owner rw, group r
+            G306: "0o640"
+            G307: "0o750"
+
+          # --- Not included (deliberate) ---
+          # G104  Duplicates errcheck
+          # G107  Dynamic URLs normal in service mesh
+          # G108  pprof gated behind auth; add back if not
+          # G114  Custom server configs with timeouts; add back if not
+          # G115  Reviewed; fd/size casts are bounded by upstream validation
+          # G204  Wrapped CLI calls with constrained arg builders
+          # G304  Paths from config/os.CreateTemp, not user input
+          # G404  Use xxhash for non-crypto; crypto/rand enforced by G5xx blocklist
+          # G601  Implicit memory aliasing — fixed in Go 1.22+
+          # G602  Slice bounds OOB — evaluate informational first
+
+    # -------------------------------------------------------------------------
+    # Project conventions
+    # -------------------------------------------------------------------------
+    forbidigo:
+      forbid:
+        - pattern: '^fmt\.Print.*$'
+          msg: "use term.* for user output or clog.* for logging"
+        - pattern: '^log\.(Print|Fatal|Panic).*$'
+          msg: "use clog.* for logging"
+      exclude-godoc-examples: true
+      analyze-types: true
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true   # Must name the linter: //nolint:errcheck // reason
+
+    depguard:
+      rules:
+        main:
+          deny:
+            - pkg: "math/rand$"
+              desc: "use math/rand/v2 for non-crypto randomness"
+            - pkg: "github.com/pkg/errors"
+              desc: "use stdlib errors + fmt.Errorf with %w"
+            - pkg: "io/ioutil"
+              desc: "deprecated since Go 1.16 — use io and os packages"
+
+    gomoddirectives:
+      replace-local: false       # No local replace directives
+      toolchain-forbidden: false
+      go-debug-forbidden: true
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/xdg/cloister
+
+severity:
+  default: warning
+  rules:
+    - linters:
+        - errcheck
+        - errorlint
+        - govet
+      severity: error
