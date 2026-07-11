@@ -63,6 +63,28 @@ idealized fair server would finish them.
 Cost may be known at enqueue or estimated; the cost section below covers
 estimation.
 
+**Weight input.** Weight is supplied by the caller on each enqueue, not
+registered with the queue; callers that manage weights centrally build their
+own registry above the API. Fairness therefore rests on a caller obligation:
+all enqueues for a tenant must carry a consistent weight over any interval
+where its share should be well-defined. Inconsistent weights blend the
+tenant's stride rate, distorting its share much as multi-writer stamping does;
+this obligation stands alongside the single-writer requirement. A weight
+change takes effect on subsequent stamps only — stamps are immutable, so a
+mid-backlog change leaves already-stamped jobs in place, a bounded transition
+effect (a raised weight underserves the tenant until its old stamps drain).
+
+**Virtual-time representation.** Virtual time is fixed-point: vstamps and
+vtimes are 64-bit integers in units of 1/SCALE, with SCALE = 10^6. The stride
+is `max(1, cost * SCALE / weight)` in pure integer arithmetic (weight is a
+positive integer; zero means one). The floor guarantees every enqueue advances
+vtime — preserving the invariant that a tenant's vstamps strictly increase —
+and binds only when `cost < weight/SCALE`, where its fairness distortion is
+negligible. Overflow is out of reach: at a sustained 10^6 cost-units per
+second at weight 1, a 64-bit virtual clock wraps after roughly 292,000 years.
+Floating-point is rejected for the stamp: it puts rounding and comparability
+hazards inside a sorted index key for no expressive gain.
+
 For a given tenant, we define the trailing edge as follows:
 
 * **Trailing edge** = its highest pending vstamp = its current vtime, the most recently enqueued job (last to be served).
@@ -211,6 +233,12 @@ consequence depends on whether fan-out is uniform across tenants.
   deviation from fairness, and reconstruction from trailing edge stamps does not
   repair it, because the stored stamps are already compressed.
 
+Both failure modes are silent: compressed stamps look like ordinary stamps.
+The stamping node therefore records its identity on each job at stamp time,
+making the failure detectable after the fact. A periodic per-tenant
+distinct-writer count during reconciliation, surfaced as a warning metric, is
+deferred future work; the recorded writer id is the durable hook it will need.
+
 ## Two-stage stamp partitioning
 
 When the enqueue boundary cannot guarantee one writer per tenant, nor uniform
@@ -230,8 +258,11 @@ unchanged. Stage one carries no fairness logic: it is a **single-tenant**
 queue whose only "tenant" is the ingestion stream itself. The caller-supplied
 tenant id rides along as a payload field and as the partition routing key,
 never as a fairness dimension — stage one neither stamps vstamps nor advances
-any per-tenant vtime. Multiple writers per partition are acceptable. The
-multi-tenant timeline begins only at stage two. The cost of stamping is
+any per-tenant vtime. Multiple writers per partition are acceptable. Stage-one
+requests carry no vstamp; the stamper consumes them in best-effort insertion
+order (any monotone storage key serves), which is irrelevant to fairness —
+fairness begins at stamping. The multi-tenant timeline begins only at stage
+two. The cost of stamping is
 assumed marginal, and fairness goals apply to the stamped work, not the
 stage-one queue.
 
@@ -353,15 +384,40 @@ store reject a stale holder's *terminal* write, not merely its heartbeat. Were
 only the heartbeat fenced, a worker stolen from — paused past its visibility
 time, never heartbeating again — could still finish and record completion
 under its dead claim, double-resolving the job. Every lease-touching write
-therefore guards on the claim id and on pending liveness: extend, complete,
-and the cancellation a worker discovers. Heartbeat failure is the
+therefore guards on the claim id and on pending liveness: extend, release,
+complete, and the cancellation a worker discovers. Heartbeat failure is the
 **detection** path that lets a preempted worker abort early and save wasted
 effort; the fence on the terminal write is the **safety** property. The two
 are independent, and only the second is required for correctness — heartbeats
 are a latency optimization, not a safety mechanism.
 
 Claim ids must be unique per claim and never reused, so a stale holder's id
-can never match a later claim.
+can never match a later claim. A *minted* claim id is never the empty value;
+the stored field, by contrast, is empty before the first claim and again
+after a release, so an empty field matches no holder and a cleared fence (see
+early release) matches nothing.
+
+### Early release
+
+A worker that cannot finish a job — a transient failure, a dependency down —
+may **release** its lease rather than completing terminally or abandoning the
+lease to expire. Release is a fenced write, guarded like a heartbeat on claim
+id and pending liveness, that sets the visibility time to now plus a
+caller-chosen delay (zero means immediately reclaimable) and **clears the
+claim id**. The delay is the caller's backoff lever; the queue supplies the
+primitive, never the retry policy. The next claim of a released job is an
+ordinary claim — the attempt count still increments, and the job keeps its
+original vstamp. Release is not a virtual-time event.
+
+Release must clear the claim id, unlike cancellation. It is the one transition
+that would otherwise leave a stale fence live: after a steal the new claim
+overwrites the claim id, and after a cancel the liveness guard rejects the old
+holder, but a released job is still pending and unclaimed, so an uncleared
+claim id would still match every guard. The releasing worker — or a goroutine
+it left behind — could complete the job it gave up, or heartbeat it and push
+the visibility time back out, silently un-releasing it. Clearing makes fence
+revocation structural: the worker's authority ends when it declares it is
+done, not at the next claim.
 
 ### Job identity
 
@@ -376,7 +432,10 @@ not drive — **cancel** (an external caller naming the job to resolve) and
 resolution lookup (polling how a job ended). Because the caller supplies it,
 enqueue is **idempotent**: submitting under an id already present is a no-op
 insert, not a duplicate, so a caller can safely retry an enqueue whose outcome
-it never observed. It is likewise the natural key for the effect-level
+it never observed. The stored record wins — a retried enqueue carrying a
+different body under the same id changes nothing — and the duplicate is
+signaled to the caller rather than silently absorbed, so an id-collision bug
+is visible instead of a quiet data loss. It is likewise the natural key for the effect-level
 deduplication job bodies must perform, since delivery is at-least-once, not
 exactly-once.
 
@@ -469,6 +528,15 @@ returning tenant is floored to the LWM — the lowest trailing edge among active
 tenants — so it queues with priority comparable to the least advanced active
 tenant, but does not otherwise jump the queue.
 
+**Clock discipline.** Visibility comparisons mix timestamps written at
+enqueue with the clock consulted at claim, and no storage backend guarantees
+one consistent clock (a sharded cluster's server-side "now" varies by shard).
+The design therefore assumes operationally bounded clock skew (NTP-class)
+rather than engineering around it: skew shifts a job's visibility by at most
+the skew bound — benign against lease granularity — and never affects fencing,
+which compares identities, not clocks. This is a documented operational
+assumption, not a correctness dependency.
+
 **Work conservation.** The system never idles a worker to preserve fairness.
 It dispatches whatever is runnable and corrects share retroactively; idle
 capacity costs more than transient unfairness.
@@ -486,8 +554,8 @@ The storage backend must provide three behaviors:
 duplicate id. The duplicate-key rejection is the basis for idempotent enqueue
 and for idempotent stamper re-emit.
 2. **Atomic conditional transition** of a single record — claim, heartbeat,
-complete, cancel expressed as guarded state changes, where guards include
-claim-id fencing and pending-state checks.
+release, complete, cancel expressed as guarded state changes, where guards
+include claim-id fencing and pending-state checks.
 3. **Ordered claim of the minimum key** — `(vstamp, job id)` — among
 **visible** records **within a named partition** — pending records in that
 partition whose visibility time has elapsed — with mutual exclusion under
@@ -516,7 +584,9 @@ cache map grows with every tenant ever seen, retaining entries for tenants
 long gone idle. Neither threatens correctness — the design tolerates both —
 but both grow unbounded without a sweep. (An expired lease is not a resolved
 record; it re-enters the visible set and still dispatches, so it is not GC's
-concern.) An implementation should reclaim resolved records on some cadence
+concern.) The terminal write records a resolution timestamp so reclamation
+has a durable key to age on. An implementation should reclaim resolved
+records on some cadence
 and evict idle-tenant cache entries (an evicted tenant simply re-floors to the
 LWM on its next enqueue, the onboarding path, so eviction is safe). Treat this
 as an operational obligation to specify, not a fairness mechanism.
@@ -542,7 +612,11 @@ A model or test suite should establish:
   job, because the fence rejects its terminal write.
 - **Lease accounting:** an in-flight (leased) job counts toward its tenant's
   backlog; reclaim preserves the job's original vstamp; lease expiry,
-  stealing, and heartbeats do not alter virtual time.
+  stealing, heartbeats, and early release do not alter virtual time.
+- **Enqueue accounting:** a tenant's cached vtime advances only when the
+  job's durable insert succeeds; a failed or duplicate insert advances
+  nothing. (Compute the stamp speculatively, commit the cache advance on
+  insert success.)
 - **Bounded retries:** a job that repeatedly fails its worker is resolved as
   exhausted at a finite attempt threshold, never retried forever. (This
   property must be enforced within the worker; the library only provides the

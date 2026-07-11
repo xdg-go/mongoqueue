@@ -16,8 +16,8 @@ the split is conceptual, not a nesting.
 
 - **Envelope** — fields the queue *interprets*: `JobID`, `TenantID`, `Cost`,
   `Partition`, `VStamp`, `Liveness`, `Resolution`, `ClaimID`, `VisibleAt`,
-  `Attempts`. Dispatch sorts, claims, fences, and reconciles on these; the queue
-  reads and writes them. (`JobID` is caller-supplied yet envelope: the queue
+  `Attempts`, `StampedBy`, `ResolvedAt`. Dispatch sorts, claims, fences, and
+  reconciles on these; the queue reads and writes them. (`JobID` is caller-supplied yet envelope: the queue
   interprets it as the `_id`, the idempotency key, and the vstamp tiebreaker.
   The category is interpretation, not origin.)
 - **Payload** — fields the queue stores and returns but never interprets:
@@ -83,19 +83,37 @@ callers still get typed enqueue and typed decode.
 ```go
 type Job struct {
     // Envelope — queue-interpreted
-    ID        string    `bson:"_id"`        // caller-supplied job id
-    TenantID  string    `bson:"tenant"`
-    Partition string    `bson:"partition"`
-    Cost      int64     `bson:"cost"`
-    VStamp    int64     `bson:"vstamp"`
-    ClaimID   string    `bson:"claim_id"`
-    VisibleAt time.Time `bson:"visible_at"`
-    Attempts  int       `bson:"attempts"`
+    ID         string    `bson:"_id"`         // caller-supplied job id
+    TenantID   string    `bson:"tenant"`
+    Partition  string    `bson:"partition"`
+    Cost       int64     `bson:"cost"`
+    VStamp     int64     `bson:"vstamp"`      // fixed-point virtual time (see arithmetic below)
+    ClaimID    string    `bson:"claim_id"`    // never empty while a claim is live; cleared by Release
+    VisibleAt  time.Time `bson:"visible_at"`
+    Attempts   int       `bson:"attempts"`
+    StampedBy  string    `bson:"stamped_by"`             // stamping node id — multi-writer detection hook
+    ResolvedAt time.Time `bson:"resolved_at,omitempty"`  // set by the terminal write; keys TTL GC
     // Payload — stored and returned, never interpreted by the queue core
-    Kind      string    `bson:"kind"`       // decode discriminator (the body's content-type)
-    Body      bson.Raw  `bson:"body"`       // native subdocument, opaque to queue code
+    Kind       string    `bson:"kind"`        // decode discriminator (the body's content-type)
+    Body       bson.Raw  `bson:"body"`        // native subdocument, opaque to queue code
 }
 ```
+
+### Virtual-time arithmetic
+
+Vstamps and vtimes are fixed-point `int64` in units of 1/SCALE, `SCALE =
+1_000_000`. The stride is
+
+```go
+stride := max(1, cost*SCALE/weight)   // pure integer arithmetic
+```
+
+Weight is `int64`, must be >= 1, and the zero value means 1 — so the
+single-tenant / don't-care case configures nothing. The `max(1, ...)` floor
+preserves the strictly-increasing-within-tenant invariant at extreme
+cost/weight ratios; overflow is out of reach (~292,000 years at a sustained
+10^6 cost-units/sec at weight 1). Weight is an enqueue input used to compute
+the stride; it is not stored on the record.
 
 (`Liveness` and `Resolution` join the record per the generic lifecycle model;
 omitted above to keep the storage shape in focus.)
@@ -134,11 +152,42 @@ boilerplate and buy no safety, given the durable guards.
 ```go
 func Enqueue[T any](ctx context.Context, q *Queue, kind string, body T, opts EnqueueOpts) error
 func Decode[T any](j *Job) (T, error)   // bson.Unmarshal(j.Body, &t)
+
+type EnqueueOpts struct {
+    JobID     string // caller-supplied; the record _id and idempotency key
+    TenantID  string
+    Partition string // empty = default partition
+    Cost      int64  // floored to a small positive minimum
+    Weight    int64  // zero means 1; must otherwise be >= 1
+}
+
+// ErrDuplicateJob signals an enqueue under an id already present.
+// The stored record wins; match with errors.Is.
+var ErrDuplicateJob = errors.New("mongoqueue: job id already exists")
 ```
 
-Envelope enqueue-fields (`Cost`, `TenantID`, `Partition`, `JobID`) travel in
-`EnqueueOpts`, **not** inside the body — the library must read them and is
-contractually blind to the body. Non-negotiable.
+Envelope enqueue-fields (`Cost`, `Weight`, `TenantID`, `Partition`, `JobID`)
+travel in `EnqueueOpts`, **not** inside the body — the library must read them
+and is contractually blind to the body. Non-negotiable.
+
+**Weight is per-enqueue.** Callers that manage weights centrally build their
+own registry above the API. Weight consistency across a tenant's producers is
+a caller obligation the generic design documents alongside the single-writer
+requirement; the library does not police it.
+
+**Duplicate contract.** A duplicate id returns `ErrDuplicateJob`; the stored
+record always wins, and the library never compares bodies (that would cost a
+read on every duplicate to serve only buggy callers). An honest retry treats
+the sentinel as success; a caller with an id-collision bug gets a signal
+instead of silent data loss.
+
+**Enqueue-side invariants.** The node's cached vtime advances only after the
+insert succeeds — a failed or duplicate insert advances nothing. The insert
+sets `visible_at` from the client clock; claims compare against server time,
+so visibility can shift by client/server skew. This is a documented
+operational assumption (NTP-class skew, benign against lease granularity),
+not something server-side stamping could eliminate — `$$NOW` is not
+guaranteed consistent across a sharded cluster either.
 
 `kind` is a payload field, so it rides as its own parameter rather than in
 `EnqueueOpts`. The facade is its only writer and pairs a stable `kind` with each
@@ -148,7 +197,8 @@ may assert the stored `kind` matches the type it decodes into, catching
 
 Enqueue is **idempotent**: insert keyed on the caller-supplied job id, rejecting
 a duplicate id, so a caller can safely retry an enqueue whose outcome it never
-observed.
+observed. The duplicate contract above (`ErrDuplicateJob`, stored record wins)
+is the surface of that idempotency.
 
 ## The Claim API
 
@@ -168,6 +218,7 @@ type ClaimedJob struct {
 func (c *ClaimedJob) ClaimID() string                                     { return c.claimID }
 func (c *ClaimedJob) Heartbeat(ctx context.Context, extend time.Duration) error
 func (c *ClaimedJob) Complete(ctx context.Context, r Resolution) error
+func (c *ClaimedJob) Release(ctx context.Context, delay time.Duration) error
 ```
 
 Under the hood this is storage behavior #3 from the generic contract — one atomic
@@ -205,7 +256,22 @@ now`, so the same query reclaims it with no separate branch.
    For worker-identity observability, add a separate `claimed_by` label via
    `ClaimOpts` rather than overloading the fence.
 3. **The fence rides on the handle** so the hot path cannot fumble it —
-   `Heartbeat` and `Complete` capture `claimID`.
+   `Heartbeat`, `Release`, and `Complete` capture `claimID`.
+
+**`Release` semantics.** A fenced write (guards on `claim_id` + pending, like
+`Heartbeat`) that sets `visible_at = now + delay` — zero means immediately
+reclaimable — and **clears `claim_id`**. Clearing is a correctness
+requirement, not tidiness: release is the one transition that would otherwise
+leave a stale fence live (steal overwrites the fence, cancel's liveness guard
+revokes it, but a released job is pending and unclaimed). An uncleared fence
+would let the releasing worker complete the job it gave up, or heartbeat it
+and silently un-release it. The library mints claim ids never-empty, so a
+cleared fence matches no guard. The delay is the caller's backoff lever;
+retry policy stays above the primitive.
+
+**`Heartbeat` semantics.** Extends from server *now* (`visible_at = now +
+extend`), not from the current `visible_at`, so repeated heartbeats cannot
+stack extensions into the far future.
 
 **Implementation notes.** Compute `now` from **server time** (ideally `$$NOW` in
 a pipeline update) so clock-skewed nodes do not steal early or late. Promote
@@ -222,19 +288,72 @@ design:
   guarding on pending liveness alone, naming only the job id:
   `q.Cancel(ctx, jobID, r)`.
 
+The terminal write (complete or cancel) sets `resolved_at`, the durable key
+GC ages on.
+
+## Lookup
+
+```go
+func (q *Queue) Get(ctx context.Context, jobID string) (*Job, error)
+```
+
+The resolution-lookup path the generic design promises: a snapshot read by
+job id, the caller's way to poll how a job ended. Returns a not-found
+sentinel for an unknown id.
+
+## Indexes, contention, and GC
+
+**Claim index:** `{partition: 1, liveness: 1, vstamp: 1, _id: 1, visible_at:
+1}`. The first four fields serve the claim filter and its `(vstamp, _id)`
+sort; `visible_at` rides in the index so the visibility predicate filters
+in-index without fetching documents. The leased low-vstamp prefix is still
+scanned past on every claim, but as index entries only.
+
+**Contention stance.** Concurrent claimers all target the same minimum
+visible document; one wins and the rest retry server-side on write conflict.
+v1 ships exact-minimum claim and should demonstrate a stated target (low
+hundreds of claims/sec per partition) so the ceiling is testable. Further
+mitigation — bounded random skip among the top-K visible, fairness-neutral
+within vstamp ties and a bounded fairness error across stamps — is documented
+contingency, deliberately deferred: if a database queue is hot enough for
+this to be a problem, a database might be the wrong coordination mechanism.
+
+**Index creation is caller-invoked, never automatic.** The library exposes
+two methods and creates nothing on init:
+
+- `EnsureIndexes(ctx)` — the claim index (and any other operational indexes).
+- `EnsureTTLIndex(ctx, retention)` — the GC TTL index, with a caller-supplied
+  retention duration.
+
+They are split because a caller may want the first and not the second: the
+claim index is required plumbing, while TTL is destructive policy. Runtime
+credentials often lack `createIndex`, and index builds on a populated
+collection are a scheduled operational event — hence no auto-creation for
+either.
+
+**GC.** The terminal write sets `resolved_at`. `EnsureTTLIndex` keys the TTL
+index on it; there is no default retention and no TTL index unless the caller
+invokes it.
+
+## Deferred / future work
+
+- **Bounded-random-skip claim** if a measured contention ceiling is hit (see
+  above).
+- **Batch enqueue.** The per-tenant vtime cache makes batching natural
+  (one cache advance, one `InsertMany`); leave API room, not in v1.
+- **Multi-writer detection.** `stamped_by` is recorded now (cheap to add
+  early, expensive to retrofit). The consumer — a per-tenant distinct-writer
+  count during reconciliation surfacing a warning metric — is future work.
+
 ## Open Questions
 
-1. **Tenant weight input.** The generic model advances `vtime` by `cost /
-   weight`, but `EnqueueOpts` as sketched carries `Cost` with no weight. Decide
-   where weight enters — per-enqueue, per-tenant registration, or a caller-
-   supplied callback — and where it is stored.
-2. **Dispatch helper.** Whether to ship a caller-side `Kind` → handler `Mux`
+1. **Dispatch helper.** Whether to ship a caller-side `Kind` → handler `Mux`
    (asynq-style) as an optional layer above the primitive. Undecided.
-3. **`Liveness` / `Resolution` representation.** Concrete BSON encoding of the
+2. **`Liveness` / `Resolution` representation.** Concrete BSON encoding of the
    liveness status and the caller-set resolution, and the `Resolution` Go type.
-4. **Index set.** The exact MongoDB indexes backing the claim sort
-   (`partition`, `liveness`, `visible_at`, `vstamp`, `_id`) and the
-   reconciliation/LWM aggregations, plus their write-amplification cost.
-5. **Reconciliation and cache surface.** How the node-local vtime cache, periodic
+3. **Reconciliation/LWM index.** The claim index is settled (above); the
+   access path for the reconciliation and LWM aggregations (per-tenant max
+   pending vstamp) and its write-amplification cost are not.
+4. **Reconciliation and cache surface.** How the node-local vtime cache, periodic
    reconciliation, and LWM computation are exposed and scheduled — internal
    goroutine, caller-driven tick, or both.

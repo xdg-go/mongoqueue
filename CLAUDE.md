@@ -31,16 +31,22 @@ the caller above the primitive.
 
 - **Envelope/body split.** The library owns the envelope (`JobID`, `TenantID`,
   `Cost`, `Partition`, `VStamp`, `Liveness`, `Resolution`, `ClaimID`,
-  `VisibleAt`, `Attempts`, `Kind`); the body is the caller's domain data, stored
-  as a native BSON subdocument (`bson.Raw`) -- opaque to queue code, queryable in
-  the database.
+  `VisibleAt`, `Attempts`, `StampedBy`, `ResolvedAt`, `Kind`); the body is the
+  caller's domain data, stored as a native BSON subdocument (`bson.Raw`) --
+  opaque to queue code, queryable in the database.
+- **Virtual time is fixed-point.** VStamps/vtimes are `int64` in 1e-6 units;
+  stride = `max(1, cost*SCALE/weight)`, weight an `int64` per-enqueue field
+  (zero means 1). Weight consistency across a tenant's producers is a caller
+  obligation, like single-writer.
 - **Typed facade over an opaque core.** Generics live only at the API boundary
   (`Enqueue[T]`, `Decode[T]`) keyed by a stable `Kind` string; storage and the
   queue core are non-generic. One queue carries unlimited heterogeneous kinds
   over a shared fairness timeline.
-- **Authorization asymmetry in signatures.** `Complete`/`Heartbeat` ride on the
-  `ClaimedJob` handle and capture the minted fence; `Cancel` stays queue-level
-  (external caller, no lease, guards on pending liveness alone).
+- **Authorization asymmetry in signatures.** `Complete`/`Heartbeat`/`Release`
+  ride on the `ClaimedJob` handle and capture the minted fence; `Cancel` stays
+  queue-level (external caller, no lease, guards on pending liveness alone).
+  `Release` (early nack with caller-chosen delay) clears the fence -- the one
+  transition that would otherwise leave a stale claim id live.
 
 ## Documentation index
 
@@ -55,7 +61,7 @@ the caller above the primitive.
   questions.
 - [docs/rejected-designs.md](docs/rejected-designs.md) -- Go/Mongo design
   alternatives considered and rejected (body typing options, body storage
-  forms), with reasoning.
+  forms, weight resolver, automatic index creation), with reasoning.
 
 **Always keep this index current: whenever a file is added to or removed from
 `docs/`, update the links above in the same change.**

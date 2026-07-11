@@ -76,3 +76,26 @@ storage forms each fail one axis:
 
 `bson.Raw` is opaque where opacity is wanted (library code) and transparent
 where transparency is wanted (the database).
+
+## Weight via resolver callback or tenant registry
+
+A caller-supplied `WeightFunc(tenantID)` resolver (or a `RegisterTenant` API)
+was considered for supplying tenant weight and rejected in favor of a plain
+per-enqueue `Weight` field in `EnqueueOpts`. The resolver's benefit —
+weight-per-tenant by construction rather than by caller discipline — did not
+justify its surface: a callback contract (call frequency, caching, error and
+missing-tenant semantics) and a policy opinion the library need not hold.
+Callers that want central weight management build their own registry above
+the API. The cost accepted: weight consistency across a tenant's producers
+becomes a documented caller obligation, alongside the single-writer
+requirement.
+
+## Automatic index creation
+
+Creating indexes (including the TTL index for GC) on library init was
+rejected. Runtime credentials often lack `createIndex`; an index build on a
+populated collection is a scheduled operational event, not a deploy side
+effect; and TTL is destructive policy no library should enable silently. The
+library instead exposes caller-invoked methods, split so callers can take one
+without the other: `EnsureIndexes` for the claim index and `EnsureTTLIndex`
+for GC, the latter requiring an explicit retention duration.
