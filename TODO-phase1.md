@@ -79,20 +79,20 @@ newly-created and modified files as one atomic commit.
 
 ### 1.2 Mongo test harness and CI
 
-- [ ] `internal/mongotest` (or `_test.go` helper -- prefer the internal
+- [x] `internal/mongotest` (or `_test.go` helper -- prefer the internal
       package so later phases reuse it): `mongotest.Connect(t)` returns a
       `*mongo.Database` with a unique name (`mqtest_` + random hex suffix),
       registers `t.Cleanup` to drop it and disconnect; reads
       `MONGOQUEUE_TEST_URI`, defaults to `mongodb://localhost:27017`
-- [ ] Fail fast with a clear message when Mongo is unreachable (connection
+- [x] Fail fast with a clear message when Mongo is unreachable (connection
       error names the URI and the env var; do not skip silently)
-- [ ] GitHub Actions workflow `.github/workflows/test.yml`: ubuntu-latest,
+- [x] GitHub Actions workflow `.github/workflows/test.yml`: ubuntu-latest,
       `mongo:8` service container on 27017, `actions/setup-go` with
       `go-version-file: go.mod`, sets `MONGOQUEUE_TEST_URI`, runs
       `make vet lint test` (use `golangci-lint-action` for the lint step)
-- [ ] **Test**: harness smoke test -- insert and read back a document in the
+- [x] **Test**: harness smoke test -- insert and read back a document in the
       isolated database
-- [ ] **Test**: two parallel tests (`t.Parallel()`) get distinct database
+- [x] **Test**: two parallel tests (`t.Parallel()`) get distinct database
       names and do not interfere
 - [ ] **Manual**: push a branch; CI workflow goes green
 
