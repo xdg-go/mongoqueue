@@ -1,0 +1,6 @@
+{
+  "enabledPlugins": {
+    "enforce-lint-go@xdg-claude": true,
+    "gopls-lsp@claude-plugins-official": true
+  }
+}
