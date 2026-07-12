@@ -30,30 +30,22 @@ const (
 )
 
 // Resolution records how a job ended. The vocabulary is open: the library
-// declares constants only for outcomes its own verbs produce
-// (ResolutionCompleted, ResolutionCanceled), and callers define their own
-// values freely beside them. The library will never define policy vocabulary
-// -- there is no ResolutionFailed, because the queue has no failure concept;
-// outcomes only the caller can judge are the caller's to name. The queue
-// establishes the value at the terminal write (Complete or Cancel) but never
-// interprets it; it exists for Get lookups and ops queries.
+// provides two canonical values (ResolutionCompleted, ResolutionCanceled) and
+// callers are free define their own. Resolution is set by the terminal write
+// (Complete or Cancel) and is absent while pending.
+//
+// There is no ResolutionFailed, because the queue library has no failure/retry
+// concept. A failure the caller intends to retry is a Release (which returns
+// the job to the visible set), not a Complete with a "failed" resolution.
+// Callers are free to define their own "failed" resolution for logging or
+// reporting; the queue library does not interpret it.
 //
 // Termination requires recording a resolution: Complete rejects an empty
 // value with ErrEmptyResolution, and Cancel writes ResolutionCanceled
 // unconditionally.
 //
-// Keep values low-cardinality, stable, and machine-matchable -- resolutions
-// are grouped and filtered on in ops queries and may be indexed.
-// Human-readable detail (error text, hostnames) does not belong here; today
-// it belongs in caller-side storage, and the representation may later grow an
-// accompanying opaque detail field for it.
-//
-// A resolution is terminal. A failure the caller intends to retry is a
-// Release (which returns the job to the visible set), not a Complete with a
-// "failed"-style resolution.
-//
-// Resolution is stored under the BSON field "resolution" and is absent while
-// the job is pending.
+// Keep caller-defined values low-cardinality, stable, and machine-matchable.
+// Human-readable detail (error text, hostnames) does not belong here.
 type Resolution string
 
 const (
@@ -101,8 +93,7 @@ type Job struct {
 	Cost int64 `bson:"cost"`
 
 	// VStamp is the job's virtual timestamp: fixed-point virtual time as
-	// an int64 in units of 1e-6. Workers claim the lowest visible
-	// (VStamp, ID) pair.
+	// an int64. Workers claim the lowest visible (VStamp, ID) pair.
 	VStamp int64 `bson:"vstamp"`
 
 	// Liveness is the job's lifecycle state, always present; guarded
@@ -115,15 +106,13 @@ type Job struct {
 	Resolution Resolution `bson:"resolution,omitempty"`
 
 	// ClaimID is the fenced claim identifier minted at dispatch. It is
-	// never empty while a claim is live; Release clears it -- the one
-	// transition that would otherwise leave a stale claim id live.
+	// never empty while a claim is live; Release clears it.
 	ClaimID string `bson:"claim_id"`
 
 	// VisibleAt gates claim eligibility: a pending job is claimable only
 	// once VisibleAt has passed. A claim pushes it forward (the lease),
 	// Heartbeat extends it, and Release resets it to now plus a
-	// caller-chosen delay; an expired lease re-enters the visible set
-	// with no sweeper.
+	// caller-chosen delay.
 	VisibleAt time.Time `bson:"visible_at"`
 
 	// Attempts counts claims of this job, incremented at each dispatch.
