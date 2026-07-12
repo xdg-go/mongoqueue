@@ -29,15 +29,45 @@ const (
 	LivenessResolved Liveness = "resolved"
 )
 
-// Resolution records how a job ended. The vocabulary is open and
-// caller-defined -- the library declares no constants. The queue establishes
-// the value at the terminal write (Complete or Cancel) but never interprets
-// it; it exists for Get lookups and ops queries.
+// Resolution records how a job ended. The vocabulary is open: the library
+// declares constants only for outcomes its own verbs produce
+// (ResolutionCompleted, ResolutionCanceled), and callers define their own
+// values freely beside them. The library will never define policy vocabulary
+// -- there is no ResolutionFailed, because the queue has no failure concept;
+// outcomes only the caller can judge are the caller's to name. The queue
+// establishes the value at the terminal write (Complete or Cancel) but never
+// interprets it; it exists for Get lookups and ops queries.
+//
+// Termination requires recording a resolution: Complete rejects an empty
+// value with ErrEmptyResolution, and Cancel writes ResolutionCanceled
+// unconditionally.
+//
+// Keep values low-cardinality, stable, and machine-matchable -- resolutions
+// are grouped and filtered on in ops queries and may be indexed.
+// Human-readable detail (error text, hostnames) does not belong here; today
+// it belongs in caller-side storage, and the representation may later grow an
+// accompanying opaque detail field for it.
+//
+// A resolution is terminal. A failure the caller intends to retry is a
+// Release (which returns the job to the visible set), not a Complete with a
+// "failed"-style resolution.
 //
 // Resolution is stored under the BSON field "resolution" and is absent while
-// the job is pending. It is a scalar discriminator today; the representation
-// may be extended later (e.g. an accompanying opaque detail field).
+// the job is pending.
 type Resolution string
+
+const (
+	// ResolutionCompleted is the default vocabulary for a job its lease
+	// holder finished normally. Callers with a richer outcome vocabulary
+	// pass their own values to Complete instead.
+	ResolutionCompleted Resolution = "completed"
+
+	// ResolutionCanceled is written by Cancel unconditionally -- the
+	// canceller supplies no resolution. By convention callers never pass
+	// this value to Complete, which keeps a stored "canceled" a reliable
+	// marker of the cancel path.
+	ResolutionCanceled Resolution = "canceled"
+)
 
 // Job is the durable record of an enqueued job: the queue-interpreted
 // envelope plus the caller's opaque payload.

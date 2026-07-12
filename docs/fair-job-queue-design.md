@@ -329,7 +329,8 @@ A job's durable record carries a **liveness** status and, once terminal, a
 **resolution**. Liveness takes two values: **pending** (awaiting or undergoing
 service) and **resolved** (terminal). The system collapses every terminal
 outcome into the single resolved status and records the outcome separately as
-a resolution set by the caller.
+a resolution — supplied by the caller on complete, supplied by the queue on
+cancel (the canceller invokes a queue verb rather than reporting an outcome).
 
 Resolution is scaffolding the queue establishes on behalf of the caller but
 does not interpret. Termination *requires* recording a resolution. Acting
@@ -473,7 +474,9 @@ Two transitions reach the resolved status, differing only in authorization:
   directly; it discovers the cancellation at its next heartbeat or terminal
   write, both of which fail the pending guard. Cancellation is therefore
   cooperative — the worker aborts within one heartbeat interval, or its
-  terminal write is rejected and its output discarded.
+  terminal write is rejected and its output discarded. Because the canceller
+  reports no outcome, the queue supplies cancel's resolution: a fixed
+  queue-defined value marking the cancel path.
 
 ClaimID need not be cleared on cancellation as long as heartbeats and terminal
 writes guard on pending state as well as ClaimID.  If ClaimID has semantic
@@ -664,7 +667,7 @@ retry policy, and result APIs decide error propagation by terminal-state
 membership. This queue owns none of that. It dispatches fairly and leases
 durably, and treats the terminal outcome as recorded metadata, not a
 control-flow input. Collapsing liveness to pending-or-resolved while recording
-the outcome as a closed resolution keeps the state machine minimal and
+the outcome as an open, uninterpreted resolution keeps the state machine minimal and
 preserves the distinction for any engine built above. The boundary is a
 deliberate scope choice: were the library to take on retry, dead-lettering, or
 result propagation, distinct terminal states would re-earn their place, and

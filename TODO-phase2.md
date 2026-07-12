@@ -68,6 +68,12 @@ The durable record and its lifecycle fields. Decide the `Liveness` /
 - [x] **Test**: `Liveness` values encode/decode as decided; round-trip
   through BSON preserves them; the pending value is filter-matchable as
   a literal (table-driven, plus a harness test inserting and filtering)
+- [x] **Amendment (post-review)**: `Resolution` gains two library constants
+  (`ResolutionCompleted`, `ResolutionCanceled`) — defined only for outcomes
+  the queue's own verbs produce, never policy vocabulary — plus the
+  `ErrEmptyResolution` sentinel. Phase 4 consumes these: `Complete` rejects
+  an empty resolution; `Cancel` drops its resolution parameter
+  (`q.Cancel(ctx, jobID)`) and writes `ResolutionCanceled` unconditionally.
 
 ### 2.1.2 Job struct
 

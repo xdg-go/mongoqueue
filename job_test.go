@@ -69,9 +69,10 @@ func TestLivenessBSONEncoding(t *testing.T) {
 	}
 }
 
-// TestResolutionBSONEncoding asserts a caller-defined Resolution value encodes
-// as its plain BSON string and round-trips intact. The vocabulary is open, so
-// arbitrary strings (including empty) must pass through unaltered.
+// TestResolutionBSONEncoding asserts a Resolution value -- library constant
+// or caller-defined -- encodes as its plain BSON string and round-trips
+// intact. The vocabulary is open, so arbitrary strings (including empty,
+// which Complete rejects at the API layer) must pass through unaltered.
 func TestResolutionBSONEncoding(t *testing.T) {
 	t.Parallel()
 
@@ -83,8 +84,8 @@ func TestResolutionBSONEncoding(t *testing.T) {
 		name  string
 		value Resolution
 	}{
-		{"completed", Resolution("completed")},
-		{"canceled", Resolution("canceled")},
+		{"completed", ResolutionCompleted},
+		{"canceled", ResolutionCanceled},
 		{"caller-defined", Resolution("shard-migrated")},
 		{"empty", Resolution("")},
 	}
@@ -198,7 +199,7 @@ func TestJobBSONRoundTrip(t *testing.T) {
 		Cost:       250,
 		VStamp:     1_000_000,
 		Liveness:   LivenessResolved,
-		Resolution: Resolution("completed"),
+		Resolution: ResolutionCompleted,
 		ClaimID:    "claim-xyz",
 		VisibleAt:  visibleAt,
 		Attempts:   2,

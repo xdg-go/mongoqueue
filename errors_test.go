@@ -15,6 +15,8 @@ func TestSentinelErrors(t *testing.T) {
 		{"ErrDuplicateJob", ErrDuplicateJob},
 		{"ErrNoJob", ErrNoJob},
 		{"ErrJobNotFound", ErrJobNotFound},
+		{"ErrInvalidWeight", ErrInvalidWeight},
+		{"ErrEmptyResolution", ErrEmptyResolution},
 	}
 
 	for _, s := range sentinels {

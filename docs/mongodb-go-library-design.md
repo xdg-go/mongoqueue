@@ -89,7 +89,7 @@ type Job struct {
     Cost       int64      `bson:"cost"`
     VStamp     int64      `bson:"vstamp"`               // fixed-point virtual time (see arithmetic below)
     Liveness   Liveness   `bson:"liveness"`             // "pending" | "resolved"; always present (guards filter on it)
-    Resolution Resolution `bson:"resolution,omitempty"` // caller-defined; set by the terminal write, absent while pending
+    Resolution Resolution `bson:"resolution,omitempty"` // open vocabulary; set by the terminal write, absent while pending
     ClaimID    string     `bson:"claim_id"`             // never empty while a claim is live; cleared by Release
     VisibleAt  time.Time  `bson:"visible_at"`
     Attempts   int        `bson:"attempts"`
@@ -127,16 +127,23 @@ stored as plain BSON strings.
   (no `omitempty`): claim, heartbeat, complete, release, and cancel are
   server-side conditional writes that filter on the pending literal, so the
   stored value must match the constant exactly.
-- **`Resolution`** is an **open, caller-defined vocabulary** — the library
-  declares no constants. The queue establishes the value at the terminal write
-  but never interprets it; it exists for `Get` lookup and ops queries. The
-  field is `omitempty`, absent while pending.
+- **`Resolution`** is an **open vocabulary with two library-defined
+  defaults**: `ResolutionCompleted = "completed"` and `ResolutionCanceled =
+  "canceled"`. The line for library constants is mechanism-versus-policy: the
+  library defines resolutions only for outcomes its own verbs produce, never
+  for outcomes only the caller can judge — no `ResolutionFailed`, because the
+  queue has no failure concept. Callers define their own values beside the
+  defaults. The queue establishes the value at the terminal write but never
+  interprets it; it exists for `Get` lookup and ops queries. The field is
+  `omitempty`, absent while pending.
 
 Strings over integer codes for ops transparency — `db.jobs.find({liveness:
 "pending"})` reads without a decoder ring — and because an open resolution
 vocabulary cannot be an enum. A scalar discriminator suffices today; the
 representation is extensible later (e.g. an accompanying opaque detail field)
-without disturbing the discriminator.
+without disturbing the discriminator. Resolution values should stay
+low-cardinality, stable, and machine-matchable; human-readable detail belongs
+elsewhere (eventually the detail field), not in the discriminator.
 
 ### Field visibility
 
@@ -304,13 +311,27 @@ The signature asymmetry encodes the authorization asymmetry from the generic
 design:
 
 - **`Complete`** is issued by the lease holder and guards on a matching claim id.
-  It rides on the `ClaimedJob` handle.
+  It rides on the `ClaimedJob` handle. The resolution is required and
+  non-empty — an empty value returns `ErrEmptyResolution` before any server
+  round trip, enforcing the generic design's "termination records a
+  resolution."
 - **`Cancel` stays queue-level** — issued by an external caller holding no lease,
   guarding on pending liveness alone, naming only the job id:
-  `q.Cancel(ctx, jobID, r)`.
+  `q.Cancel(ctx, jobID)`. It takes no resolution: the canceller invokes a
+  queue verb rather than reporting an outcome, so the library writes
+  `ResolutionCanceled` unconditionally. This makes a stored `"canceled"` a
+  reliable marker of the cancel path (by convention, callers never pass
+  `ResolutionCanceled` to `Complete`). If a cancel-reason need appears, the
+  escape hatch is a future `CancelOpts.Resolution` override — the open
+  vocabulary means adding it breaks nothing.
 
 The terminal write (complete or cancel) sets `resolved_at`, the durable key
 GC ages on.
+
+A resolution is terminal. A failure the caller intends to retry is a
+`Release`, not a `Complete` with a "failed"-style resolution — retry policy
+lives above the primitive, and a resolved job never re-enters the visible
+set.
 
 ## Lookup
 

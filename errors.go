@@ -17,3 +17,9 @@ var ErrJobNotFound = errors.New("mongoqueue: job not found")
 // ErrInvalidWeight signals a negative EnqueueOpts.Weight; match with
 // errors.Is. Weight must be >= 1; the zero value means 1.
 var ErrInvalidWeight = errors.New("mongoqueue: weight must be >= 1 (zero means 1)")
+
+// ErrEmptyResolution signals a Complete with an empty Resolution; match with
+// errors.Is. Termination requires recording a resolution, so the zero value
+// is rejected before any server round trip. (Cancel takes no resolution; it
+// writes ResolutionCanceled unconditionally.)
+var ErrEmptyResolution = errors.New("mongoqueue: resolution must be non-empty")
