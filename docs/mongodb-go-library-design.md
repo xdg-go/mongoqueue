@@ -223,8 +223,9 @@ is the surface of that idempotency.
 ## The Claim API
 
 ```go
-// ErrNoJob signals an empty visible set in the partition — expected, not failure.
-// Mirrors mongo.ErrNoDocuments so callers loop on errors.Is.
+// ErrNoJob signals an empty visible set in the partition — expected, not
+// failure. Returned by Claim; match with errors.Is. It plays the role of
+// mongo.ErrNoDocuments at the queue boundary but does not wrap it.
 var ErrNoJob = errors.New("mongoqueue: no claimable job")
 
 func (q *Queue) Claim(ctx context.Context, partition string, lease time.Duration) (*ClaimedJob, error)

@@ -89,10 +89,10 @@ The durable record and its lifecycle fields. Decide the `Liveness` /
 
 ### 2.1.3 Sentinel errors
 
-- [ ] `ErrDuplicateJob` (enqueue idempotency collision), `ErrNoJob` (empty
+- [x] `ErrDuplicateJob` (enqueue idempotency collision), `ErrNoJob` (empty
   claim set), and a not-found sentinel for `Get`; godoc stating which
   operations return each
-- [ ] **Test**: sentinels are distinct and match via `errors.Is`
+- [x] **Test**: sentinels are distinct and match via `errors.Is`
 
 ---
 
