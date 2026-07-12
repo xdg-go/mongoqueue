@@ -51,26 +51,26 @@ newly-created and modified files as one logical unit.
 Per-tenant soft state on the `Queue`. Advance only after a successful insert;
 minimal cold-start seed here, full reconciliation and LWM in Phase 6.
 
-- [ ] Per-tenant vtime map guarded by a mutex on `Queue` (or a small
+- [x] Per-tenant vtime map guarded by a mutex on `Queue` (or a small
   `vtimeCache` type owned by `Queue`)
-- [ ] Reserve-next-vstamp operation: given `(tenant, cost, weight)`, compute
+- [x] Reserve-next-vstamp operation: given `(tenant, cost, weight)`, compute
   candidate `vstamp = vtime + stride(cost, weight)` without mutating state
-- [ ] Commit operation: advance the tenant's vtime to the candidate only
+- [x] Commit operation: advance the tenant's vtime to the candidate only
   after the caller reports a successful insert; failed/duplicate insert
   advances nothing
-- [ ] Serialize reserve→insert→commit per tenant so concurrent enqueues for
+- [x] Serialize reserve→insert→commit per tenant so concurrent enqueues for
   one tenant yield strictly increasing vstamps (document the chosen locking
   granularity: global vs per-tenant)
-- [ ] Cold-start seed: on first touch of an unseen tenant, query max pending
+- [x] Cold-start seed: on first touch of an unseen tenant, query max pending
   `vstamp` for that tenant (0 if none); document as the minimal seed,
   superseded by Phase 6 reconciliation
-- [ ] **Test**: unit -- failed/duplicate insert advances nothing; next
+- [x] **Test**: unit -- failed/duplicate insert advances nothing; next
   reserve reuses the same base vtime
-- [ ] **Test**: unit -- strides accumulate: successive commits for one tenant
+- [x] **Test**: unit -- strides accumulate: successive commits for one tenant
   produce strictly increasing vstamps matching `stride` arithmetic
-- [ ] **Test**: race -- concurrent enqueues (goroutines) for one tenant
+- [x] **Test**: race -- concurrent enqueues (goroutines) for one tenant
   produce unique, strictly increasing vstamps; run with `-race`
-- [ ] **Test**: integration -- cold-start seed picks up max pending vstamp
+- [x] **Test**: integration -- cold-start seed picks up max pending vstamp
   from pre-inserted records; unseen tenant starts at the floor
 
 ## 3.2 Enqueue core

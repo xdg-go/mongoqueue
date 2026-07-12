@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -21,6 +22,7 @@ import (
 type Queue struct {
 	coll   *mongo.Collection
 	nodeID string
+	vtimes *vtimeCache // node-local per-tenant vtime soft state (see vtimecache.go)
 }
 
 // Option configures a Queue at construction time. Options are applied by New in
@@ -47,11 +49,51 @@ func New(coll *mongo.Collection, opts ...Option) *Queue {
 	q := &Queue{
 		coll:   coll,
 		nodeID: defaultNodeID(),
+		vtimes: newVtimeCache(),
 	}
+	q.vtimes.seedHook = q.seedTenantVtime
 	for _, opt := range opts {
 		opt(q)
 	}
 	return q
+}
+
+// seedTenantVtime is the vtime cache's cold-start seed (see
+// vtimeCache.seedHook): on the first enqueue for a tenant this node has not
+// seen, it returns the maximum vstamp among the tenant's pending jobs, or 0
+// if the tenant has none. Resolved jobs are excluded -- their timeline slots
+// are already consumed and TTL-collected records must not pin the floor.
+//
+// This is the minimal seed: it prevents a restarted node from re-stamping a
+// tenant's timeline below jobs already waiting, but it does not track other
+// writers after the first touch. Full reconciliation (periodic re-query, low
+// water mark, idle floor) arrives in Phase 6 and supersedes it.
+//
+// Index dependency: this query wants {tenant: 1, liveness: 1, vstamp: -1}.
+// The claim index specified in the design doc leads with partition and
+// cannot serve it; without a seed index, first touch of a tenant is a
+// filtered collection scan under that tenant's cache lock. Whichever phase
+// adds index management must include the seed index.
+func (q *Queue) seedTenantVtime(ctx context.Context, tenant string) (int64, error) {
+	filter := bson.D{
+		{Key: "tenant", Value: tenant},
+		{Key: "liveness", Value: LivenessPending},
+	}
+	opts := options.FindOne().
+		SetSort(bson.D{{Key: "vstamp", Value: -1}}).
+		SetProjection(bson.D{{Key: "vstamp", Value: 1}})
+
+	var doc struct {
+		VStamp int64 `bson:"vstamp"`
+	}
+	err := q.coll.FindOne(ctx, filter, opts).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("mongoqueue: seed vtime for tenant %q: %w", tenant, err)
+	}
+	return doc.VStamp, nil
 }
 
 // defaultNodeID builds hostname-pid-<random hex>. A hostname lookup failure

@@ -223,3 +223,68 @@ func TestNodeID(t *testing.T) {
 		t.Errorf("WithNodeID nodeID = %q, want %q", custom.nodeID, "custom-id")
 	}
 }
+
+// seedRecord names the fields the cold-start seed query reads; the full Job
+// schema is not needed because the seed filters on tenant and pending
+// liveness and projects vstamp alone.
+type seedRecord struct {
+	ID       string   `bson:"_id"`
+	Tenant   string   `bson:"tenant"`
+	Liveness Liveness `bson:"liveness"`
+	VStamp   int64    `bson:"vstamp"`
+}
+
+// seedDoc inserts a minimal job document for cold-start seed tests.
+func seedDoc(ctx context.Context, t *testing.T, coll *mongo.Collection, doc seedRecord) {
+	t.Helper()
+	if _, err := coll.InsertOne(ctx, doc); err != nil {
+		t.Fatalf("insert seed doc %q: %v", doc.ID, err)
+	}
+}
+
+// TestColdStartSeed verifies the vtime cache's cold-start seed: the first
+// reserve for a tenant with pending records starts from the max pending
+// vstamp (resolved records excluded), and a tenant with no records starts at
+// the floor of 0. This is the minimal Phase 3.1 seed; full reconciliation is
+// Phase 6.
+func TestColdStartSeed(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	coll := db.Collection("jobs")
+
+	const (
+		maxPending = 12 * scale
+		cost       = int64(1)
+		weight     = int64(1)
+	)
+	// Two pending records for tenant "warm" plus a resolved record with a
+	// higher vstamp, which must NOT influence the seed: resolved slots are
+	// already consumed and may be TTL-collected at any time.
+	seedDoc(ctx, t, coll, seedRecord{ID: "j1", Tenant: "warm", Liveness: LivenessPending, VStamp: 5 * scale})
+	seedDoc(ctx, t, coll, seedRecord{ID: "j2", Tenant: "warm", Liveness: LivenessPending, VStamp: maxPending})
+	seedDoc(ctx, t, coll, seedRecord{ID: "j3", Tenant: "warm", Liveness: LivenessResolved, VStamp: 99 * scale})
+
+	q := New(coll)
+
+	r, err := q.vtimes.reserve(ctx, "warm", cost, weight)
+	if err != nil {
+		t.Fatalf("reserve for seeded tenant: %v", err)
+	}
+	if want := maxPending + stride(cost, weight); r.vstamp != want {
+		t.Errorf("seeded tenant first vstamp = %d, want %d (max pending %d + stride)", r.vstamp, want, maxPending)
+	}
+	r.Commit()
+
+	// A tenant with no records at all seeds at the floor of 0, so its first
+	// candidate is exactly one stride.
+	r2, err := q.vtimes.reserve(ctx, "fresh", cost, weight)
+	if err != nil {
+		t.Fatalf("reserve for unseen tenant: %v", err)
+	}
+	if want := stride(cost, weight); r2.vstamp != want {
+		t.Errorf("unseen tenant first vstamp = %d, want %d (floor 0 + stride)", r2.vstamp, want)
+	}
+	r2.Abort()
+}
