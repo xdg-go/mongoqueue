@@ -94,7 +94,7 @@ newly-created and modified files as one atomic commit.
       isolated database
 - [x] **Test**: two parallel tests (`t.Parallel()`) get distinct database
       names and do not interfere
-- [ ] **Manual**: push a branch; CI workflow goes green
+- [x] **Manual**: push a branch; CI workflow goes green
 
 ### 1.3 Queue construction and indexes
 

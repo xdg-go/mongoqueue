@@ -396,7 +396,7 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - github.com/xdg/cloister
+        - github.com/xdg-go/mongoqueue
 
 severity:
   default: warning
