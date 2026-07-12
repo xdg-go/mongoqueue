@@ -71,18 +71,18 @@ The durable record and its lifecycle fields. Decide the `Liveness` /
 
 ### 2.1.2 Job struct
 
-- [ ] `Job` struct per the design doc: envelope fields (`ID`, `TenantID`,
+- [x] `Job` struct per the design doc: envelope fields (`ID`, `TenantID`,
   `Partition`, `Cost`, `VStamp`, `ClaimID`, `VisibleAt`, `Attempts`,
   `StampedBy`, `ResolvedAt`) plus `Liveness`/`Resolution` from 2.1.1,
   plus payload (`Kind`, `Body bson.Raw`); exported fields, documented
   read-only snapshot
-- [ ] Godoc on `Job` and each field, including the read-only-snapshot
+- [x] Godoc on `Job` and each field, including the read-only-snapshot
   contract and the `bson` tag mapping
-- [ ] **Test**: BSON round-trip of a fully populated `Job` -- every field
+- [x] **Test**: BSON round-trip of a fully populated `Job` -- every field
   survives marshal/unmarshal with the expected wire names
-- [ ] **Test**: zero-value / omitempty behavior -- `resolved_at` absent on
+- [x] **Test**: zero-value / omitempty behavior -- `resolved_at` absent on
   a pending job's stored document
-- [ ] **Test** (integration): insert a `Job` whose `Body` is a native
+- [x] **Test** (integration): insert a `Job` whose `Body` is a native
   subdocument; query it by a body field (e.g. `body.customer`) and get
   the document back -- body is opaque to queue code but queryable in the
   database
