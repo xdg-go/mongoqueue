@@ -61,6 +61,26 @@ pattern. Rejected because it flattens envelope and body into one namespace:
 ORMs accept this because they own the full row per type. A queue primitive wants
 a uniform envelope plus an opaque body, which embedding cannot give.
 
+## Facade shape: free functions vs per-kind binding
+
+Given the typed generic facade, two shapes were on the table:
+
+- **Free functions**: `Enqueue[T](ctx, q, kind, body, opts)` and
+  `Decode[T](j, kind)`, restating the kind string at every call site.
+- **Per-kind binding** (chosen): `NewKind[T](kind)` returns a `Kind[T]` value
+  whose `Enqueue`/`Decode` methods carry the pairing.
+
+Free functions were rejected because the kind↔type pairing becomes a
+convention repeated at every call site instead of a declaration made once. The
+kind argument on `Decode` catches only *string* disagreement;
+`Decode[WrongType](j, "send-email")` compiles and mis-decodes silently when
+the wrong struct overlaps the right one -- the exact drift class the assertion
+exists to catch. The binding removes that call site from the language: every
+decode reaches the body through the one value that paired the string with the
+type. It is also the natural substrate for the deferred `Mux` dispatch helper.
+Cost accepted: a type, a constructor, and a `Kind()` accessor instead of two
+functions. Offering both shapes was rejected as two ways to do one thing.
+
 ## Body storage: JSON bytes vs embedding vs BSON-native
 
 Opacity-in-code and transparency-in-storage are independent axes. The chosen

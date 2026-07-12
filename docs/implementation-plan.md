@@ -130,8 +130,9 @@ generic API boundary. After this phase, jobs land in Mongo correctly stamped.
   envelope fields land top-level, body opaque
 
 ### 3.3 Typed facade
-- `Enqueue[T]` (facade marshals `T`; no caller-built `bson.Raw`) and
-  `Decode[T]` with `kind` mismatch assertion
+- Per-kind binding `NewKind[T](kind)` returning `Kind[T]` with
+  `Enqueue`/`Decode` methods (binding marshals `T`; no caller-built
+  `bson.Raw`); `Decode` returns `ErrKindMismatch` on `kind`↔type drift
 - **Test**: round-trip through facade; `kind`↔type drift caught on decode;
   heterogeneous kinds coexist in one collection
 

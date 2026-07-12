@@ -177,8 +177,16 @@ boilerplate and buy no safety, given the durable guards.
 ## The Enqueue API
 
 ```go
-func Enqueue[T any](ctx context.Context, q *Queue, kind string, body T, opts EnqueueOpts) error
-func Decode[T any](j *Job) (T, error)   // bson.Unmarshal(j.Body, &t)
+// Kind pairs a stable kind string with a body type T. The kind↔type
+// contract has exactly one declaration site -- a package-level var --
+// so enqueue and decode cannot drift apart.
+type Kind[T any] struct{ /* unexported kind string */ }
+
+func NewKind[T any](kind string) Kind[T] // panics on empty kind (init-time programmer error)
+
+func (k Kind[T]) Kind() string
+func (k Kind[T]) Enqueue(ctx context.Context, q *Queue, body T, opts EnqueueOpts) error
+func (k Kind[T]) Decode(j *Job) (T, error) // ErrKindMismatch unless j.Kind == k.Kind()
 
 type EnqueueOpts struct {
     JobID     string // caller-supplied; the record _id and idempotency key
@@ -216,11 +224,19 @@ operational assumption (NTP-class skew, benign against lease granularity),
 not something server-side stamping could eliminate — `$$NOW` is not
 guaranteed consistent across a sharded cluster either.
 
-`kind` is a payload field, so it rides as its own parameter rather than in
-`EnqueueOpts`. The facade is its only writer and pairs a stable `kind` with each
-body type `T`; the queue stores the string without interpreting it. `Decode[T]`
-may assert the stored `kind` matches the type it decodes into, catching
-`kind`↔type drift on read.
+`kind` is a payload field, so it rides on the `Kind[T]` binding rather than in
+`EnqueueOpts`. The binding is its only writer and pairs a stable `kind` with
+one body type `T` at a single declaration site; the queue stores the string
+without interpreting it. `Decode` asserts the stored `kind` matches the
+binding's, returning `ErrKindMismatch` (wrapped with both kind strings) on
+`kind`↔type drift -- and since every decode reaches the body through a binding,
+the wrong-type-right-string mistake has no call site to happen at. Worker-side
+dispatch switches on the envelope's `Kind` field and calls the matching
+binding's `Decode`.
+
+Bodies must marshal to a BSON *document*; `bson.Marshal` rejects top-level
+scalars and arrays, and enqueue surfaces that error rather than adding its own
+check.
 
 Enqueue is **idempotent**: insert keyed on the caller-supplied job id, rejecting
 a duplicate id, so a caller can safely retry an enqueue whose outcome it never

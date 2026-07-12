@@ -39,7 +39,9 @@ the caller above the primitive.
   (zero means 1). Weight consistency across a tenant's producers is a caller
   obligation, like single-writer.
 - **Typed facade over an opaque core.** Generics live only at the API boundary
-  (`Enqueue[T]`, `Decode[T]`) keyed by a stable `Kind` string; storage and the
+  as per-kind bindings (`NewKind[T](kind)` returns a `Kind[T]` whose
+  `Enqueue`/`Decode` methods carry the kind↔type pairing declared at one
+  site); storage and the
   queue core are non-generic. One queue carries unlimited heterogeneous kinds
   over a shared fairness timeline.
 - **Authorization asymmetry in signatures.** `Complete`/`Heartbeat`/`Release`
