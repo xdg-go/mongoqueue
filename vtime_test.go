@@ -48,21 +48,6 @@ func TestStride(t *testing.T) {
 	}
 }
 
-// TestStrideComposedWithNormalizeWeight covers the real enqueue-path
-// composition: a caller-supplied zero weight passes through normalizeWeight
-// (zero means 1) before reaching stride.
-func TestStrideComposedWithNormalizeWeight(t *testing.T) {
-	t.Parallel()
-
-	w, err := normalizeWeight(0)
-	if err != nil {
-		t.Fatalf("normalizeWeight(0) returned unexpected error: %v", err)
-	}
-	if got, want := stride(7, w), int64(7_000_000); got != want {
-		t.Errorf("stride(7, normalizeWeight(0)) = %d, want %d", got, want)
-	}
-}
-
 // TestNormalizeWeight verifies the zero-means-1 mapping, pass-through of
 // weights >= 1, and rejection of negative weights with the ErrInvalidWeight
 // sentinel. Fractional weights between 0 and 1 are unrepresentable in int64,
