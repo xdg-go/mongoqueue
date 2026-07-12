@@ -98,25 +98,25 @@ newly-created and modified files as one atomic commit.
 
 ### 1.3 Queue construction and indexes
 
-- [ ] `Queue` struct holding the `*mongo.Collection` and node id;
+- [x] `Queue` struct holding the `*mongo.Collection` and node id;
       `New(coll *mongo.Collection, opts ...Option) *Queue` -- performs no I/O
-- [ ] Default node id: `hostname-pid-<random hex>`; `WithNodeID(string)`
+- [x] Default node id: `hostname-pid-<random hex>`; `WithNodeID(string)`
       functional option overrides (needed later for multi-writer tests)
-- [ ] `EnsureIndexes(ctx)`: creates the claim index
+- [x] `EnsureIndexes(ctx)`: creates the claim index
       `{partition: 1, liveness: 1, vstamp: 1, _id: 1, visible_at: 1}`,
       idempotent on re-call
-- [ ] `EnsureTTLIndex(ctx, retention time.Duration)`: TTL index on
+- [x] `EnsureTTLIndex(ctx, retention time.Duration)`: TTL index on
       `resolved_at`, `expireAfterSeconds` from retention; document that
       calling again with a *different* retention returns the driver's
       index-conflict error (caller resolves via `collMod` -- record this
       decision in the design doc's open questions)
-- [ ] **Test**: `New` creates no indexes (collection has only `_id_` after
+- [x] **Test**: `New` creates no indexes (collection has only `_id_` after
       construction and a write)
-- [ ] **Test**: `EnsureIndexes` creates exactly the claim index with the
+- [x] **Test**: `EnsureIndexes` creates exactly the claim index with the
       specified keys; second call succeeds without error
-- [ ] **Test**: `EnsureTTLIndex(ctx, 24*time.Hour)` creates a TTL index on
+- [x] **Test**: `EnsureTTLIndex(ctx, 24*time.Hour)` creates a TTL index on
       `resolved_at` with `expireAfterSeconds == 86400`
-- [ ] **Test**: node id defaults to non-empty and unique across two `New`
+- [x] **Test**: node id defaults to non-empty and unique across two `New`
       calls; `WithNodeID` overrides it
 
 ---

@@ -333,7 +333,20 @@ either.
 
 **GC.** The terminal write sets `resolved_at`. `EnsureTTLIndex` keys the TTL
 index on it; there is no default retention and no TTL index unless the caller
-invokes it.
+invokes it. Retention is validated to `[1s, math.MaxInt32 s]` (~68 years):
+MongoDB's TTL granularity is whole seconds, so a sub-second or non-positive
+retention would truncate to `expireAfterSeconds: 0` and delete every resolved
+job the instant it resolves. `EnsureTTLIndex` rejects an out-of-range retention
+locally rather than create that silent-data-loss index.
+
+**Changing TTL retention.** `EnsureTTLIndex` called again with a *different*
+retention returns the driver's index-conflict error rather than silently
+dropping and recreating the index. The library will not perform a destructive
+drop-and-recreate implicitly -- a retention change is an operational decision,
+and the same `resolved_at` key with a new `expireAfterSeconds` is exactly the
+conflict the server reports. The caller resolves it with a `collMod` command
+against `expireAfterSeconds`, which mutates the existing index in place without
+a rebuild.
 
 ## Deferred / future work
 
