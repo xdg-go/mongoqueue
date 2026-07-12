@@ -13,3 +13,7 @@ var ErrNoJob = errors.New("mongoqueue: no claimable job")
 
 // ErrJobNotFound signals a Get for an unknown job id; match with errors.Is.
 var ErrJobNotFound = errors.New("mongoqueue: job not found")
+
+// ErrInvalidWeight signals a negative EnqueueOpts.Weight; match with
+// errors.Is. Weight must be >= 1; the zero value means 1.
+var ErrInvalidWeight = errors.New("mongoqueue: weight must be >= 1 (zero means 1)")

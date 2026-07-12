@@ -100,18 +100,18 @@ The durable record and its lifecycle fields. Decide the `Liveness` /
 
 Pure integer arithmetic; no database.
 
-- [ ] Stride function: `max(1, cost*SCALE/weight)` with
+- [x] Stride function: `max(1, cost*SCALE/weight)` with
   `SCALE = 1_000_000`; pure integer math
-- [ ] Cost floor and validation; weight validation: zero means 1,
+- [x] Cost floor and validation; weight validation: zero means 1,
   otherwise `>= 1` required
-- [ ] Godoc explaining the fixed-point representation (int64, 1e-6 units)
+- [x] Godoc explaining the fixed-point representation (int64, 1e-6 units)
   and why the floor preserves strict monotonicity
-- [ ] **Test**: table-driven stride cases -- typical costs/weights, extreme
+- [x] **Test**: table-driven stride cases -- typical costs/weights, extreme
   ratios (huge cost / weight 1, cost 1 / huge weight), floor engagement,
   weight zero-means-1
-- [ ] **Test**: validation rejects weight < 0 and (if decided) weight
+- [x] **Test**: validation rejects weight < 0 and (if decided) weight
   between 0 and 1 semantics; cost floor behavior
-- [ ] **Test**: strictly-increasing-within-tenant property -- repeated
+- [x] **Test**: strictly-increasing-within-tenant property -- repeated
   stride advances from any starting vtime never repeat or regress, even
   when the floor is active
 
