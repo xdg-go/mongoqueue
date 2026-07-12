@@ -78,26 +78,26 @@ minimal cold-start seed here, full reconciliation and LWM in Phase 6.
 Non-generic insert path on `Queue`; the facade in 3.3 is its only public
 entry point for bodies.
 
-- [ ] `EnqueueOpts` struct per the design doc: `JobID`, `TenantID`,
+- [x] `EnqueueOpts` struct per the design doc: `JobID`, `TenantID`,
   `Partition`, `Cost`, `Weight`
-- [ ] Validation: required `JobID`; `normalizeCost` floor; `normalizeWeight`
+- [x] Validation: required `JobID`; `normalizeCost` floor; `normalizeWeight`
   (`ErrInvalidWeight`); empty `Partition` maps to the default partition
-- [ ] Internal enqueue: build the `Job` record -- envelope fields top-level,
+- [x] Internal enqueue: build the `Job` record -- envelope fields top-level,
   `Kind` string, `Body bson.Raw` subdocument; set initial liveness,
   `visible_at` from client clock, `stamped_by` from the node id
-- [ ] Insert keyed on caller `JobID` as `_id`; map duplicate-key error to
+- [x] Insert keyed on caller `JobID` as `_id`; map duplicate-key error to
   `ErrDuplicateJob` (match server error via driver helpers, not string
   matching)
-- [ ] Wire cache commit: advance tenant vtime only on successful insert
-- [ ] **Test**: unit -- opts validation table: missing JobID, cost floor,
+- [x] Wire cache commit: advance tenant vtime only on successful insert
+- [x] **Test**: unit -- opts validation table: missing JobID, cost floor,
   weight zero-means-1, invalid weight
-- [ ] **Test**: integration -- idempotent retry with same JobID returns
+- [x] **Test**: integration -- idempotent retry with same JobID returns
   `ErrDuplicateJob`; stored record wins (fields unchanged after retry with
   different body)
-- [ ] **Test**: integration -- stored record has envelope fields top-level
+- [x] **Test**: integration -- stored record has envelope fields top-level
   and body as a native subdocument queryable by field (e.g. find on
   `body.customer_id`)
-- [ ] **Test**: integration -- `stamped_by` reflects the enqueueing node id;
+- [x] **Test**: integration -- `stamped_by` reflects the enqueueing node id;
   `visible_at` set; liveness pending
 
 ## 3.3 Typed facade

@@ -6,6 +6,11 @@ import "errors"
 // The stored record wins.
 var ErrDuplicateJob = errors.New("mongoqueue: job id already exists")
 
+// ErrMissingJobID signals an enqueue with an empty EnqueueOpts.JobID. The
+// job id is the record's _id and the idempotency key, so the library cannot
+// invent one; the caller must supply it.
+var ErrMissingJobID = errors.New("mongoqueue: job id is required")
+
 // ErrNoJob signals an empty visible set in the partition -- expected, not
 // failure. Returned by Claim. It plays the role of mongo.ErrNoDocuments at
 // the queue boundary but does not wrap it.
