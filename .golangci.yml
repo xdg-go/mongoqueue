@@ -325,7 +325,6 @@ linters:
             - G403  # Short RSA key (<2048)
             - G405  # DES/RC4 usage
             - G406  # Deprecated MD4/RIPEMD160
-            - G407  # Hardcoded IV/nonce
 
             # --- Cryptography (imports) ---
             # Redundant with G4xx for call sites, but enforces a clean policy:
