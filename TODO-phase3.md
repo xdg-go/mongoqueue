@@ -106,27 +106,27 @@ Generics only at the boundary; storage and queue core stay non-generic. The
 facade is a per-kind binding: the kind↔type pairing has exactly one
 declaration site (decided; see design doc and rejected-designs.md).
 
-- [ ] `Kind[T any]` type with unexported kind string; `NewKind[T](kind)`
+- [x] `Kind[T any]` type with unexported kind string; `NewKind[T](kind)`
   constructor panics on empty kind (init-time programmer error, per
   `regexp.MustCompile` precedent)
-- [ ] `Kind()` accessor for worker-side dispatch switches
-- [ ] `(Kind[T]) Enqueue(ctx, q, body T, opts EnqueueOpts) error` -- binding
+- [x] `Kind()` accessor for worker-side dispatch switches
+- [x] `(Kind[T]) Enqueue(ctx, q, body T, opts EnqueueOpts) error` -- binding
   marshals `T` to `bson.Raw`; callers never build raw BSON; non-document
   bodies (scalar/array) fail at `bson.Marshal` and the error is surfaced,
   no extra check
-- [ ] `(Kind[T]) Decode(j *Job) (T, error)` -- asserts `j.Kind` matches the
+- [x] `(Kind[T]) Decode(j *Job) (T, error)` -- asserts `j.Kind` matches the
   binding's kind; `ErrKindMismatch` sentinel wrapped with both kind strings
-- [ ] Add `ErrKindMismatch` to errors.go, matching existing sentinel style
-- [ ] Godoc: the binding is the single declaration site of the kind↔type
+- [x] Add `ErrKindMismatch` to errors.go, matching existing sentinel style
+- [x] Godoc: the binding is the single declaration site of the kind↔type
   contract; the queue stores `kind` without interpreting it
-- [ ] **Test**: unit/integration -- round-trip: `k.Enqueue` then read back
+- [x] **Test**: unit/integration -- round-trip: `k.Enqueue` then read back
   and `k.Decode` yields the original value
-- [ ] **Test**: kind↔type drift -- decoding a job through a different
+- [x] **Test**: kind↔type drift -- decoding a job through a different
   binding returns `ErrKindMismatch`, not silent garbage
-- [ ] **Test**: integration -- heterogeneous kinds coexist in one
+- [x] **Test**: integration -- heterogeneous kinds coexist in one
   collection and decode independently via their bindings
-- [ ] **Test**: non-document body (e.g. `int`) rejected at enqueue
-- [ ] **Test**: `NewKind("")` panics
+- [x] **Test**: non-document body (e.g. `int`) rejected at enqueue
+- [x] **Test**: `NewKind("")` panics
 
 ---
 

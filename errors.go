@@ -23,6 +23,12 @@ var ErrJobNotFound = errors.New("mongoqueue: job not found")
 // >= 1; the zero value means 1.
 var ErrInvalidWeight = errors.New("mongoqueue: weight must be >= 1 (zero means 1)")
 
+// ErrKindMismatch signals a Decode through a binding whose kind does not
+// match the job's stored kind -- kind↔type drift caught at the boundary
+// instead of silently decoding one kind's body as another's type. The
+// wrapping error carries both kind strings; match with errors.Is.
+var ErrKindMismatch = errors.New("mongoqueue: job kind does not match binding")
+
 // ErrEmptyResolution signals a Complete with an empty Resolution.
 // Termination requires recording a resolution, so the zero value is rejected
 // before any server round trip. (Cancel takes no resolution; it writes
