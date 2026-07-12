@@ -2,8 +2,9 @@
 
 Expanded from [docs/implementation-plan.md](docs/implementation-plan.md)
 Phase 2. The durable `Job` shape and the pure fixed-point math, testable
-without any queue behavior. Resolves open question #2 (`Liveness` /
-`Resolution` representation) in
+without any queue behavior. Resolves the `Liveness` / `Resolution`
+representation question, now recorded in the "Liveness and Resolution
+representation" subsection of
 [docs/mongodb-go-library-design.md](docs/mongodb-go-library-design.md) --
 it blocks everything downstream.
 
@@ -52,19 +53,19 @@ The durable record and its lifecycle fields. Decide the `Liveness` /
 
 ### 2.1.1 Liveness and Resolution representation
 
-- [ ] Decide the `Liveness` Go type and BSON encoding. Constraints from the
+- [x] Decide the `Liveness` Go type and BSON encoding. Constraints from the
   design docs: exactly two values (pending / resolved); claim, heartbeat,
   release, and cancel guard on pending liveness in server-side conditional
   writes, so the encoding must be cheap to match in a filter
-- [ ] Decide the `Resolution` Go type and BSON encoding. Constraints:
+- [x] Decide the `Resolution` Go type and BSON encoding. Constraints:
   caller-set, queue-established but never interpreted by queue code;
   terminal write records exactly one; usable for resolution lookup via
   `Get`
-- [ ] Record the decision in
+- [x] Record the decision in
   [docs/mongodb-go-library-design.md](docs/mongodb-go-library-design.md):
   update the `Job` struct listing (currently omits both fields) and close
-  open question #2
-- [ ] **Test**: `Liveness` values encode/decode as decided; round-trip
+  the open question on `Liveness`/`Resolution` representation
+- [x] **Test**: `Liveness` values encode/decode as decided; round-trip
   through BSON preserves them; the pending value is filter-matchable as
   a literal (table-driven, plus a harness test inserting and filtering)
 

@@ -90,7 +90,8 @@ caller-invoked index creation. No queue semantics yet.
 ## Phase 2: Job Record and Virtual-Time Arithmetic
 
 The durable shape and the pure math, testable without any queue behavior.
-Resolves open question #2 (Liveness/Resolution representation) -- it blocks
+Resolves the Liveness/Resolution representation question, now recorded in the
+design doc's "Liveness and Resolution representation" subsection -- it blocks
 everything downstream.
 
 ### 2.1 Core types
@@ -188,7 +189,7 @@ target, proving the fairness properties the design promises.
 
 ## Phase 6: Reconciliation and Cache Lifecycle
 
-Resolves open questions #3 (reconciliation/LWM access path) and #4 (surface
+Resolves open questions #2 (reconciliation/LWM access path) and #3 (surface
 and scheduling). Bounds vtime-cache drift and handles restart/idle correctly.
 
 ### 6.1 Reconciliation

@@ -83,19 +83,21 @@ callers still get typed enqueue and typed decode.
 ```go
 type Job struct {
     // Envelope — queue-interpreted
-    ID         string    `bson:"_id"`         // caller-supplied job id
-    TenantID   string    `bson:"tenant"`
-    Partition  string    `bson:"partition"`
-    Cost       int64     `bson:"cost"`
-    VStamp     int64     `bson:"vstamp"`      // fixed-point virtual time (see arithmetic below)
-    ClaimID    string    `bson:"claim_id"`    // never empty while a claim is live; cleared by Release
-    VisibleAt  time.Time `bson:"visible_at"`
-    Attempts   int       `bson:"attempts"`
-    StampedBy  string    `bson:"stamped_by"`             // stamping node id — multi-writer detection hook
-    ResolvedAt time.Time `bson:"resolved_at,omitempty"`  // set by the terminal write; keys TTL GC
+    ID         string     `bson:"_id"` // caller-supplied job id
+    TenantID   string     `bson:"tenant"`
+    Partition  string     `bson:"partition"`
+    Cost       int64      `bson:"cost"`
+    VStamp     int64      `bson:"vstamp"`               // fixed-point virtual time (see arithmetic below)
+    Liveness   Liveness   `bson:"liveness"`             // "pending" | "resolved"; always present (guards filter on it)
+    Resolution Resolution `bson:"resolution,omitempty"` // caller-defined; set by the terminal write, absent while pending
+    ClaimID    string     `bson:"claim_id"`             // never empty while a claim is live; cleared by Release
+    VisibleAt  time.Time  `bson:"visible_at"`
+    Attempts   int        `bson:"attempts"`
+    StampedBy  string     `bson:"stamped_by"`            // stamping node id — multi-writer detection hook
+    ResolvedAt time.Time  `bson:"resolved_at,omitempty"` // set by the terminal write; keys TTL GC
     // Payload — stored and returned, never interpreted by the queue core
-    Kind       string    `bson:"kind"`        // decode discriminator (the body's content-type)
-    Body       bson.Raw  `bson:"body"`        // native subdocument, opaque to queue code
+    Kind string   `bson:"kind"` // decode discriminator (the body's content-type)
+    Body bson.Raw `bson:"body"` // native subdocument, opaque to queue code
 }
 ```
 
@@ -115,8 +117,26 @@ cost/weight ratios; overflow is out of reach (~292,000 years at a sustained
 10^6 cost-units/sec at weight 1). Weight is an enqueue input used to compute
 the stride; it is not stored on the record.
 
-(`Liveness` and `Resolution` join the record per the generic lifecycle model;
-omitted above to keep the storage shape in focus.)
+### Liveness and Resolution representation
+
+Both are typed strings — `type Liveness string`, `type Resolution string` —
+stored as plain BSON strings.
+
+- **`Liveness`** has exactly two values, `LivenessPending Liveness = "pending"`
+  and `LivenessResolved Liveness = "resolved"`, and the field is always present
+  (no `omitempty`): claim, heartbeat, complete, release, and cancel are
+  server-side conditional writes that filter on the pending literal, so the
+  stored value must match the constant exactly.
+- **`Resolution`** is an **open, caller-defined vocabulary** — the library
+  declares no constants. The queue establishes the value at the terminal write
+  but never interprets it; it exists for `Get` lookup and ops queries. The
+  field is `omitempty`, absent while pending.
+
+Strings over integer codes for ops transparency — `db.jobs.find({liveness:
+"pending"})` reads without a decoder ring — and because an open resolution
+vocabulary cannot be an enum. A scalar discriminator suffices today; the
+representation is extensible later (e.g. an accompanying opaque detail field)
+without disturbing the discriminator.
 
 ### Field visibility
 
@@ -227,7 +247,7 @@ Under the hood this is storage behavior #3 from the generic contract — one ato
 ```go
 filter := bson.D{
     {"partition", partition},
-    {"liveness", Pending},
+    {"liveness", LivenessPending},
     {"visible_at", bson.D{{"$lte", now}}},      // visible = pending + elapsed
 }
 opts := options.FindOneAndUpdate().
@@ -362,11 +382,9 @@ a rebuild.
 
 1. **Dispatch helper.** Whether to ship a caller-side `Kind` → handler `Mux`
    (asynq-style) as an optional layer above the primitive. Undecided.
-2. **`Liveness` / `Resolution` representation.** Concrete BSON encoding of the
-   liveness status and the caller-set resolution, and the `Resolution` Go type.
-3. **Reconciliation/LWM index.** The claim index is settled (above); the
+2. **Reconciliation/LWM index.** The claim index is settled (above); the
    access path for the reconciliation and LWM aggregations (per-tenant max
    pending vstamp) and its write-amplification cost are not.
-4. **Reconciliation and cache surface.** How the node-local vtime cache, periodic
+3. **Reconciliation and cache surface.** How the node-local vtime cache, periodic
    reconciliation, and LWM computation are exposed and scheduled — internal
    goroutine, caller-driven tick, or both.
