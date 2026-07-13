@@ -194,6 +194,7 @@ type EnqueueOpts struct {
     Partition string // empty = default partition
     Cost      int64  // floored to a small positive minimum
     Weight    int64  // zero means 1; must otherwise be >= 1
+    Delay     time.Duration // delayed enqueue: visible_at = now + Delay; zero = immediately visible
 }
 
 // ErrDuplicateJob signals an enqueue under an id already present.
@@ -215,6 +216,13 @@ record always wins, and the library never compares bodies (that would cost a
 read on every duplicate to serve only buggy callers). An honest retry treats
 the sentinel as success; a caller with an id-collision bug gets a signal
 instead of silent data loss.
+
+**Delayed enqueue.** `Delay` is supported: the insert sets `visible_at = now +
+Delay` (zero means immediately visible), reusing the same visibility mechanism
+as leases and `Release` — claims simply do not see the job until `visible_at`
+elapses. The vstamp is assigned at enqueue as usual, so a delayed job competes
+at its enqueue-time fairness position once visible, not at the front. Negative
+delays are rejected (`ErrInvalidDelay`).
 
 **Enqueue-side invariants.** The node's cached vtime advances only after the
 insert succeeds — a failed or duplicate insert advances nothing. The insert
@@ -422,7 +430,15 @@ a rebuild.
    (asynq-style) as an optional layer above the primitive. Undecided.
 2. **Reconciliation/LWM index.** The claim index is settled (above); the
    access path for the reconciliation and LWM aggregations (per-tenant max
-   pending vstamp) and its write-amplification cost are not.
+   pending vstamp) and its write-amplification cost are not. Note this is no
+   longer purely future work: the Phase 3.1 cold-start seed already runs the
+   per-tenant max-pending-vstamp query (`{tenant, liveness}` filter, `vstamp`
+   descending), which the claim index cannot serve (it leads with
+   `partition`). Without a `{tenant: 1, liveness: 1, vstamp: -1}` index, first
+   touch of a tenant is a filtered collection scan under that tenant's cache
+   lock. `EnsureIndexes` exists already and must grow this seed index; whether
+   the same index also serves the Phase 6 reconciliation aggregations is the
+   part still open.
 3. **Reconciliation and cache surface.** How the node-local vtime cache, periodic
    reconciliation, and LWM computation are exposed and scheduled — internal
    goroutine, caller-driven tick, or both.

@@ -136,6 +136,12 @@ generic API boundary. After this phase, jobs land in Mongo correctly stamped.
 - **Test**: round-trip through facade; `kind`↔type drift caught on decode;
   heterogeneous kinds coexist in one collection
 
+### 3.4 Amendments (post-review)
+- `EnqueueOpts.Delay` -- delayed enqueue: `visible_at = now + Delay`, zero
+  means immediately visible, negative rejected (`ErrInvalidDelay`)
+- Seed index in `EnsureIndexes`: `{tenant, liveness, vstamp desc}` -- serves
+  the Phase 3.1 cold-start seed query, which the claim index cannot
+
 ---
 
 ## Phase 4: Claim, Lease, and Resolution
