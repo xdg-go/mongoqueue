@@ -202,7 +202,8 @@ and scheduling). Bounds vtime-cache drift and handles restart/idle correctly.
 ### 6.1 Reconciliation
 - Per-tenant max-pending-vstamp aggregation; decide and document the
   index/access path and its write-amplification cost
-- Cache rebuild on startup; periodic reconcile bounding drift
+- Cache rebuild on startup; periodic reconcile bounding drift; eviction to
+  bound memory
 - **Test**: node restart mid-stream preserves within-tenant monotonicity;
   reconcile corrects a deliberately skewed cache
 
@@ -233,7 +234,8 @@ Production readiness: GC, observability hooks, and public documentation.
 
 ### 7.3 Documentation
 - Package godoc: model overview, caller obligations (single-writer,
-  weight consistency, index creation, at-least-once effects)
+  weight consistency, index creation, at-least-once effects, delayed jobs jump
+  the queue)
 - Runnable example: enqueue/claim/complete loop with a worker pool
 - Reconcile design docs with as-built decisions; update open questions
 
