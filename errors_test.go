@@ -16,6 +16,7 @@ func TestSentinelErrors(t *testing.T) {
 		{"ErrNoJob", ErrNoJob},
 		{"ErrJobNotFound", ErrJobNotFound},
 		{"ErrInvalidWeight", ErrInvalidWeight},
+		{"ErrInvalidDelay", ErrInvalidDelay},
 		{"ErrEmptyResolution", ErrEmptyResolution},
 	}
 

@@ -23,6 +23,10 @@ var ErrJobNotFound = errors.New("mongoqueue: job not found")
 // >= 1; the zero value means 1.
 var ErrInvalidWeight = errors.New("mongoqueue: weight must be >= 1 (zero means 1)")
 
+// ErrInvalidDelay signals a negative EnqueueOpts.Delay. Zero means
+// immediately visible; a job cannot be made visible in the past.
+var ErrInvalidDelay = errors.New("mongoqueue: delay must be >= 0")
+
 // ErrKindMismatch signals a Decode through a binding whose kind does not
 // match the job's stored kind -- kind↔type drift caught at the boundary
 // instead of silently decoding one kind's body as another's type. The

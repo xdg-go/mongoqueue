@@ -54,6 +54,21 @@ func TestEnqueueOptsNormalize(t *testing.T) {
 			want: normalizedEnqueue{jobID: "j1", tenantID: "t1", partition: "p1", cost: 10, weight: 4},
 		},
 		{
+			name:    "negative delay rejected",
+			opts:    EnqueueOpts{JobID: "j1", Delay: -time.Second},
+			wantErr: ErrInvalidDelay,
+		},
+		{
+			name: "zero delay unchanged",
+			opts: EnqueueOpts{JobID: "j1", Delay: 0},
+			want: normalizedEnqueue{jobID: "j1", partition: defaultPartition, cost: 1, weight: 1},
+		},
+		{
+			name: "positive delay passes through",
+			opts: EnqueueOpts{JobID: "j1", Delay: time.Minute},
+			want: normalizedEnqueue{jobID: "j1", partition: defaultPartition, cost: 1, weight: 1, delay: time.Minute},
+		},
+		{
 			name: "empty partition maps to default",
 			opts: EnqueueOpts{JobID: "j1", TenantID: "t1", Cost: 2, Weight: 2},
 			want: normalizedEnqueue{jobID: "j1", tenantID: "t1", partition: defaultPartition, cost: 2, weight: 2},
@@ -237,5 +252,32 @@ func TestEnqueueStampsProvenance(t *testing.T) {
 		job.VisibleAt.Before(before.Add(-time.Millisecond)) ||
 		job.VisibleAt.After(after.Add(time.Millisecond)) {
 		t.Errorf("visible_at = %v, want within [%v, %v]", job.VisibleAt, before, after)
+	}
+}
+
+// TestEnqueueDelaySetsVisibleAt asserts a positive Delay pushes visible_at to
+// enqueue time plus Delay.
+func TestEnqueueDelaySetsVisibleAt(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	q := New(db.Collection("jobs"))
+
+	const delay = 90 * time.Second
+	before := time.Now().UTC()
+	if err := q.enqueue(ctx, "payment", rawBody(t, bson.D{{Key: "n", Value: int32(1)}}),
+		EnqueueOpts{JobID: "j1", TenantID: "t1", Delay: delay}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	after := time.Now().UTC()
+
+	job := findJob(ctx, t, q, "j1")
+	// BSON datetimes have millisecond precision, so widen the window by 1ms
+	// on each side rather than asserting exact bounds.
+	lo := before.Add(delay - time.Millisecond)
+	hi := after.Add(delay + time.Millisecond)
+	if job.VisibleAt.Before(lo) || job.VisibleAt.After(hi) {
+		t.Errorf("visible_at = %v, want within [%v, %v]", job.VisibleAt, lo, hi)
 	}
 }

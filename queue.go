@@ -69,11 +69,11 @@ func New(coll *mongo.Collection, opts ...Option) *Queue {
 // writers after the first touch. Full reconciliation (periodic re-query, low
 // water mark, idle floor) arrives in Phase 6 and supersedes it.
 //
-// Index dependency: this query wants {tenant: 1, liveness: 1, vstamp: -1}.
-// The claim index specified in the design doc leads with partition and
-// cannot serve it; without a seed index, first touch of a tenant is a
-// filtered collection scan under that tenant's cache lock. Whichever phase
-// adds index management must include the seed index.
+// Index dependency: this query is served by the seed index
+// {tenant: 1, liveness: 1, vstamp: -1} that EnsureIndexes creates. The claim
+// index leads with partition and cannot serve it; without the seed index,
+// first touch of a tenant is a filtered collection scan under that tenant's
+// cache lock.
 func (q *Queue) seedTenantVtime(ctx context.Context, tenant string) (int64, error) {
 	filter := bson.D{
 		{Key: "tenant", Value: tenant},
@@ -119,29 +119,38 @@ func randomHex() string {
 	return hex.EncodeToString(b[:])
 }
 
-// EnsureIndexes creates the claim index required for dispatch:
-// {partition: 1, liveness: 1, vstamp: 1, _id: 1, visible_at: 1}. The first four
-// keys serve the claim filter and its (vstamp, _id) sort; visible_at rides in
-// the index so the visibility predicate filters in-index without fetching
-// documents.
+// EnsureIndexes creates the two indexes the queue's hot paths depend on.
 //
-// The index is created with the driver's auto-generated name, so re-calling
-// EnsureIndexes with an identical key specification is a server-side no-op and
+// The claim index {partition: 1, liveness: 1, vstamp: 1, _id: 1, visible_at: 1}
+// serves dispatch: the first four keys serve the claim filter and its
+// (vstamp, _id) sort; visible_at rides in the index so the visibility
+// predicate filters in-index without fetching documents.
+//
+// The seed index {tenant: 1, liveness: 1, vstamp: -1} serves the cold-start
+// seed query, which reads a tenant's maximum pending vstamp.
+//
+// Indexes are created with the driver's auto-generated names, so re-calling
+// EnsureIndexes with identical key specifications is a server-side no-op and
 // returns no error. Index creation is never automatic; the caller invokes this
 // deliberately because runtime credentials often lack createIndex and index
 // builds on a populated collection are a scheduled operational event.
 func (q *Queue) EnsureIndexes(ctx context.Context) error {
-	model := mongo.IndexModel{
-		Keys: bson.D{
+	models := []mongo.IndexModel{
+		{Keys: bson.D{
 			{Key: "partition", Value: 1},
 			{Key: "liveness", Value: 1},
 			{Key: "vstamp", Value: 1},
 			{Key: "_id", Value: 1},
 			{Key: "visible_at", Value: 1},
-		},
+		}},
+		{Keys: bson.D{
+			{Key: "tenant", Value: 1},
+			{Key: "liveness", Value: 1},
+			{Key: "vstamp", Value: -1},
+		}},
 	}
-	if _, err := q.coll.Indexes().CreateOne(ctx, model); err != nil {
-		return fmt.Errorf("mongoqueue: create claim index: %w", err)
+	if _, err := q.coll.Indexes().CreateMany(ctx, models); err != nil {
+		return fmt.Errorf("mongoqueue: create claim and seed indexes: %w", err)
 	}
 	return nil
 }

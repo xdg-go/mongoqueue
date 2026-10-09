@@ -85,10 +85,10 @@ func TestNewCreatesNoIndexes(t *testing.T) {
 	}
 }
 
-// TestEnsureIndexesCreatesClaimIndex asserts EnsureIndexes creates exactly the
-// claim index with keys in the specified order, and that a second call is a
-// no-op returning no error.
-func TestEnsureIndexesCreatesClaimIndex(t *testing.T) {
+// TestEnsureIndexesCreatesClaimAndSeedIndexes asserts EnsureIndexes creates
+// exactly the claim and seed indexes with keys in the specified order, and
+// that a second call is a no-op returning no error.
+func TestEnsureIndexesCreatesClaimAndSeedIndexes(t *testing.T) {
 	t.Parallel()
 
 	db := mongotest.Connect(t)
@@ -100,40 +100,46 @@ func TestEnsureIndexesCreatesClaimIndex(t *testing.T) {
 		t.Fatalf("EnsureIndexes: %v", err)
 	}
 
-	want := bson.D{
-		{Key: "partition", Value: int32(1)},
-		{Key: "liveness", Value: int32(1)},
-		{Key: "vstamp", Value: int32(1)},
-		{Key: "_id", Value: int32(1)},
-		{Key: "visible_at", Value: int32(1)},
+	// Assert both the field order and the sort direction the spec pins, so a
+	// regression in key order or direction is caught.
+	want := map[string]bson.D{
+		"claim": {
+			{Key: "partition", Value: int32(1)},
+			{Key: "liveness", Value: int32(1)},
+			{Key: "vstamp", Value: int32(1)},
+			{Key: "_id", Value: int32(1)},
+			{Key: "visible_at", Value: int32(1)},
+		},
+		"seed": {
+			{Key: "tenant", Value: int32(1)},
+			{Key: "liveness", Value: int32(1)},
+			{Key: "vstamp", Value: int32(-1)},
+		},
 	}
-	var claim *indexInfo
-	all := listIndexes(ctx, t, coll)
-	for i := range all {
-		if all[i].Name == "_id_" {
+	var got []bson.D
+	for _, idx := range listIndexes(ctx, t, coll) {
+		if idx.Name == "_id_" {
 			continue
 		}
-		if claim != nil {
-			t.Fatalf("found more than one non-_id_ index; second is %q", all[i].Name)
+		var key bson.D
+		if err := bson.Unmarshal(idx.Key, &key); err != nil {
+			t.Fatalf("decode index key %v: %v", idx.Key, err)
 		}
-		claim = &all[i]
-	}
-	if claim == nil {
-		t.Fatal("no non-_id_ index found after EnsureIndexes")
-	}
-
-	// Assert both the field order and the sort direction (:1) the spec pins,
-	// so a regression to a descending or hashed key is caught.
-	var got bson.D
-	if err := bson.Unmarshal(claim.Key, &got); err != nil {
-		t.Fatalf("decode claim index key %v: %v", claim.Key, err)
+		got = append(got, key)
 	}
 	if len(got) != len(want) {
-		t.Fatalf("claim index key = %v, want %v", got, want)
+		t.Fatalf("non-_id_ indexes = %v, want %d", got, len(want))
 	}
-	for i := range want {
-		if got[i].Key != want[i].Key || got[i].Value != want[i].Value {
-			t.Fatalf("claim index key = %v, want %v (mismatch at %d)", got, want, i)
+	for name, w := range want {
+		found := false
+		for _, g := range got {
+			if keysEqual(g, w) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%s index %v not found among %v", name, w, got)
 		}
 	}
 
@@ -287,4 +293,16 @@ func TestColdStartSeed(t *testing.T) {
 		t.Errorf("unseen tenant first vstamp = %d, want %d (floor 0 + stride)", r2.vstamp, want)
 	}
 	r2.Abort()
+}
+
+func keysEqual(a, b bson.D) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Key != b[i].Key || a[i].Value != b[i].Value {
+			return false
+		}
+	}
+	return true
 }

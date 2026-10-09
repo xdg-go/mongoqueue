@@ -133,15 +133,15 @@ declaration site (decided; see design doc and rejected-designs.md).
 Expanded from implementation-plan.md 3.4; design decisions recorded in
 docs/mongodb-go-library-design.md (delayed-enqueue paragraph, open question 2).
 
-- [ ] `EnqueueOpts.Delay time.Duration`: `visible_at = now + Delay`; zero
+- [x] `EnqueueOpts.Delay time.Duration`: `visible_at = now + Delay`; zero
   means immediately visible; negative returns `ErrInvalidDelay` (new sentinel
   in errors.go, existing style). Vstamp still assigned at enqueue -- a
   delayed job competes at its enqueue-time fairness position once visible.
-- [ ] Seed index in `EnsureIndexes`: add `{tenant: 1, liveness: 1,
+- [x] Seed index in `EnsureIndexes`: add `{tenant: 1, liveness: 1,
   vstamp: -1}` alongside the claim index (serves the cold-start seed query)
-- [ ] **Test**: unit -- negative Delay rejected; zero Delay unchanged
-- [ ] **Test**: integration -- Delay > 0 stores `visible_at ≈ now + Delay`
-- [ ] **Test**: integration -- `EnsureIndexes` creates both indexes
+- [x] **Test**: unit -- negative Delay rejected; zero Delay unchanged
+- [x] **Test**: integration -- Delay > 0 stores `visible_at ≈ now + Delay`
+- [x] **Test**: integration -- `EnsureIndexes` creates both indexes
 
 ---
 

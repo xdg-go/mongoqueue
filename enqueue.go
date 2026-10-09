@@ -47,6 +47,13 @@ type EnqueueOpts struct {
 	// rejected with ErrInvalidWeight. Weight consistency across a
 	// tenant's producers is a caller obligation.
 	Weight int64
+
+	// Delay postpones the job's first visibility: visible_at is set to
+	// enqueue time plus Delay. Zero means immediately visible; a negative
+	// value is rejected with ErrInvalidDelay. The vstamp is still assigned
+	// at enqueue, so a delayed job keeps its enqueue-time fairness position
+	// and, once visible, competes ahead of work its tenant enqueued later.
+	Delay time.Duration
 }
 
 // normalizedEnqueue is the validated form of EnqueueOpts: cost and weight
@@ -58,12 +65,13 @@ type normalizedEnqueue struct {
 	partition string
 	cost      int64
 	weight    int64
+	delay     time.Duration
 }
 
 // normalize validates opts and resolves defaults: JobID is required
 // (ErrMissingJobID), cost is floored via normalizeCost, weight is checked via
 // normalizeWeight (ErrInvalidWeight), and an empty Partition maps to the
-// default partition.
+// default partition. A negative Delay is rejected (ErrInvalidDelay).
 func (o EnqueueOpts) normalize() (normalizedEnqueue, error) {
 	if o.JobID == "" {
 		return normalizedEnqueue{}, ErrMissingJobID
@@ -71,6 +79,9 @@ func (o EnqueueOpts) normalize() (normalizedEnqueue, error) {
 	weight, err := normalizeWeight(o.Weight)
 	if err != nil {
 		return normalizedEnqueue{}, err
+	}
+	if o.Delay < 0 {
+		return normalizedEnqueue{}, ErrInvalidDelay
 	}
 	partition := o.Partition
 	if partition == "" {
@@ -82,6 +93,7 @@ func (o EnqueueOpts) normalize() (normalizedEnqueue, error) {
 		partition: partition,
 		cost:      normalizeCost(o.Cost),
 		weight:    weight,
+		delay:     o.Delay,
 	}, nil
 }
 
@@ -126,7 +138,7 @@ func (q *Queue) enqueue(ctx context.Context, kind string, body bson.Raw, opts En
 		Cost:      n.cost,
 		VStamp:    res.vstamp,
 		Liveness:  LivenessPending,
-		VisibleAt: time.Now().UTC(),
+		VisibleAt: time.Now().UTC().Add(n.delay),
 		StampedBy: q.nodeID,
 		Kind:      kind,
 		Body:      body,
