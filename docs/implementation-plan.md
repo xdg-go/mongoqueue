@@ -18,7 +18,18 @@ with a working, tested slice; later phases layer on without rework.
   validation, and encoding round-trips are plain table-driven `testing` tests
   with no database.
 - **Concurrency tests**: mutual exclusion under concurrent claimers is a core
-  invariant; test with real goroutine races, not sequenced calls.
+  invariant; test with real goroutine races, not sequenced calls. Every
+  outcome a race test accepts also has a deterministic, sequenced test that
+  forces it: the race test proves the invariant holds under real
+  interleaving, the sequenced test guarantees each branch runs. Race tests
+  log the outcome distribution but do not assert it.
+- **Control time through data, not a clock**: there is no mock clock --
+  visibility compares against server `$$NOW`, which a client-side fake
+  cannot move. Force expiry by writing `visible_at` into the past; test
+  exclusion with visibility minutes in the future; use leases far longer
+  than a race test's deadline. Never sleep. Bound server-time assertions
+  with `$$NOW` samples taken before and after the operation, not the client
+  clock.
 
 ## Verification Checklist
 
