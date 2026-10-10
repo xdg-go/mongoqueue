@@ -33,7 +33,7 @@ const connectTimeout = 10 * time.Second
 // is unreachable. It registers a t.Cleanup that drops the database and
 // disconnects the client. It is safe under t.Parallel(): each call gets its
 // own database whose name carries a random suffix.
-func Connect(t *testing.T) *mongo.Database {
+func Connect(t testing.TB) *mongo.Database {
 	t.Helper()
 
 	uri := os.Getenv(envURI)
@@ -76,7 +76,7 @@ func Connect(t *testing.T) *mongo.Database {
 // randomHex returns 16 hex characters (8 random bytes) for use as a database
 // name suffix. A crypto/rand read failure is fatal to the test rather than
 // silently producing collidable names.
-func randomHex(t *testing.T) string {
+func randomHex(t testing.TB) string {
 	t.Helper()
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {

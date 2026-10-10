@@ -1,4 +1,4 @@
-.PHONY: all test vet lint
+.PHONY: all test vet lint bench
 
 all: vet lint test
 
@@ -10,3 +10,6 @@ vet:
 
 lint:
 	golangci-lint run
+
+bench:
+	go test -run '^$$' -bench BenchmarkClaimComplete -benchtime 2000x .

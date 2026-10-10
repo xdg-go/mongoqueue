@@ -476,6 +476,36 @@ scan range, so keys examined grow linearly with the leased/delayed
 low-vstamp prefix; this is the expected cost of the design, paid in index
 entries rather than document fetches.
 
+**Benchmark (2026-10-10, MongoDB 8.2.11).** `make bench`
+(`BenchmarkClaimComplete`, 2,000 jobs per sub-benchmark), median of three
+runs. WiredTiger, single-member replica set on localhost; the client sets no
+write concern, so the server default `w: "majority"` applies. Host: Apple M4,
+10 cores, 16 GB RAM, macOS 26.6.2, Go 1.26.4. Each cycle is a Claim followed
+by an immediate Complete, run by G concurrent workers on one partition, so
+the leased prefix stays near G entries. It does not measure claims against a
+large in-flight leased prefix; the explain check above covers that scan cost.
+
+| G (workers) | cycles/s (median) | wall ms per cycle |
+|------------:|------------------:|------------------:|
+| 1           | 56.1              | 17.8              |
+| 4           | 227.1             | 4.4               |
+| 16          | 759.2             | 1.3               |
+| 64          | 1388              | 0.7               |
+
+Wall ms per cycle is elapsed time divided by cycles (1000 / throughput), not
+per-worker latency: at G = 64 each worker spends about 46 ms per cycle.
+Run-to-run spread is small (widest: G = 4 ranged 204-231). G ≥ 4 meets the
+"low hundreds of claims/sec per partition" target; G = 1 falls below 100.
+A single worker cannot contend, so the G = 1 rate is pure per-operation
+latency: about 18 ms per cycle, or roughly 9 ms for each of its two
+`w: "majority"` writes (Claim and Complete). That is consistent with each
+acknowledged write waiting on a journal flush on this host, a likely
+explanation that was not separately measured. Throughput scales nearly
+linearly through G = 16 (4 workers ≈ 4.0×, 16 ≈ 13.5× the G = 1 rate), so
+contention on the minimum document costs little at those levels. Scaling
+flattens above that (64 ≈ 24.7×); this run does not separate min-document
+contention from client or server concurrency limits.
+
 **Contention stance.** Concurrent claimers all target the same minimum
 visible document; one wins and the rest retry server-side on write conflict.
 v1 ships exact-minimum claim and should demonstrate a stated target (low

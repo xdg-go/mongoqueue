@@ -203,10 +203,10 @@ check in the design doc) and later claims slow for an artifactual reason.
 Real workers resolve jobs, which removes them from the `liveness: pending`
 index range.
 
-- [ ] Widen `mongotest.Connect` (and helpers) to `testing.TB` per 5.0
-- [ ] `BenchmarkClaimComplete` with sub-benchmarks for G = 1, 4, 16, 64
+- [x] Widen `mongotest.Connect` (and helpers) to `testing.TB` per 5.0
+- [x] `BenchmarkClaimComplete` with sub-benchmarks for G = 1, 4, 16, 64
   workers (`b.Run(fmt.Sprintf("workers=%d", g), ...)`)
-- [ ] Per sub-benchmark: fresh database via `mongotest.Connect(b)`;
+- [x] Per sub-benchmark: fresh database via `mongotest.Connect(b)`;
   `EnsureIndexes`; seed b.N pending jobs with `InsertMany` in batches,
   bypassing enqueue. Insert full `Job` structs, not hand-built documents --
   direct inserts skip enqueue's normalization, and missing fields break
@@ -218,7 +218,7 @@ index range.
   null on a missing field), `Kind: "bench"`, and an empty-document `Body`.
   Run one warm-up `Ping` so connection setup is outside the timer, then
   `b.ResetTimer()`
-- [ ] Workers reserve work with an atomic **ticket** taken *before* each
+- [x] Workers reserve work with an atomic **ticket** taken *before* each
   Claim: `if tickets.Add(1) > int64(b.N) { return }`, then
   Claim(1-minute lease) → `cj.Complete(ctx, ResolutionCompleted)`. Counting
   completions instead would let a worker Claim while the last jobs are
@@ -227,12 +227,12 @@ index range.
   goroutines -- record the first error, wait for all workers, then fail
   from the main goroutine. After the wait, `b.StopTimer()` and verify
   completed cycles == b.N.
-- [ ] `b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "cycles/s")` --
+- [x] `b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "cycles/s")` --
   label it cycles (Claim+Complete), not claims
-- [ ] `make bench`: `go test -run '^$$' -bench BenchmarkClaimComplete
+- [x] `make bench`: `go test -run '^$$' -bench BenchmarkClaimComplete
   -benchtime 2000x .` (fixed iteration count, so seeding cost is bounded
   and runs are comparable). Not part of `all`.
-- [ ] Run it three times against a local `mongod` and record the median
+- [x] Run it three times against a local `mongod` and record the median
   per G in the design doc's "Indexes, contention, and GC" section, next to
   the explain check: date, MongoDB version, topology (standalone vs
   replica set), write concern, host hardware summary, and a table of
@@ -240,7 +240,7 @@ index range.
   immediate completion, so the leased prefix stays near G entries. It
   does not measure claims against a large in-flight leased prefix (the
   explain check covers that scan cost).
-- [ ] **Stop rule**: the target is "low hundreds" of cycles/s per
+- [x] **Stop rule**: the target is "low hundreds" of cycles/s per
   partition. If any G ≥ 4 median is below 100 cycles/s, stop and report
   the numbers to the user. Do not attribute it to min-document contention
   without evidence (compare against G = 1; a low G = 1 number points at
