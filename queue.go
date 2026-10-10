@@ -13,6 +13,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 )
 
 // Queue is a handle to a fair, multi-tenant job queue backed by a single
@@ -23,6 +24,9 @@ type Queue struct {
 	coll   *mongo.Collection
 	nodeID string
 	vtimes *vtimeCache // node-local per-tenant vtime soft state (see vtimecache.go)
+	// primary is coll with primary read preference, for reads that must not
+	// see a stale secondary (Get, Cancel's diagnostic read).
+	primary *mongo.Collection
 }
 
 // Option configures a Queue at construction time. Options are applied by New in
@@ -45,11 +49,20 @@ func WithNodeID(id string) Option {
 //
 // By default the queue mints a node id of the form hostname-pid-<random hex>;
 // pass WithNodeID to override it.
+//
+// Lease fencing relies on acknowledged writes: the queue never inspects or
+// overrides coll's write concern, so that choice is the caller's. An
+// unacknowledged write concern (w: 0) breaks fencing, because a fence miss
+// cannot be observed. Single resolution across a failover requires
+// w: "majority"; a w: 1 write can roll back, letting a second resolution win.
 func New(coll *mongo.Collection, opts ...Option) *Queue {
 	q := &Queue{
 		coll:   coll,
 		nodeID: defaultNodeID(),
 		vtimes: newVtimeCache(),
+	}
+	if coll != nil {
+		q.primary = coll.Clone(options.Collection().SetReadPreference(readpref.Primary()))
 	}
 	q.vtimes.seedHook = q.seedTenantVtime
 	for _, opt := range opts {

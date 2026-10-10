@@ -167,7 +167,7 @@ single-tenant queue.
 
 ### 4.3 Resolution and reclaim
 - `Complete(ctx, r)`: fenced terminal write, sets `resolved_at`
-- `Cancel(ctx, jobID, r)`: queue-level, guards on pending liveness only
+- `Cancel(ctx, jobID)`: queue-level, guards on pending liveness only
 - `Get(ctx, jobID)`: snapshot read, not-found sentinel
 - **Test**: expired lease re-enters visible set and is reclaimed with
   incremented attempts; exactly one of {late Complete, steal-then-Complete}

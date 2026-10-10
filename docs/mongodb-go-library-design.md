@@ -264,6 +264,7 @@ func (q *Queue) Claim(ctx context.Context, partition string, lease time.Duration
 type ClaimedJob struct {
     Job                  // envelope + Body bson.Raw, promoted
     q       *Queue
+    jobID   string       // captured at claim time; guards use this, not Job.ID
     claimID string       // the fence minted for THIS claim; unexported so it can't be forged
 }
 
@@ -280,15 +281,16 @@ Under the hood this is storage behavior #3 from the generic contract — one ato
 filter := bson.D{
     {"partition", partition},
     {"liveness", LivenessPending},
-    {"visible_at", bson.D{{"$lte", now}}},      // visible = pending + elapsed
+    {"$expr", bson.D{{"$lte", bson.A{"$visible_at", "$$NOW"}}}}, // visible = pending + elapsed
 }
 opts := options.FindOneAndUpdate().
     SetSort(bson.D{{"vstamp", 1}, {"_id", 1}}). // minimum (vstamp, job id)
     SetReturnDocument(options.After)
-update := bson.D{
-    {"$set", bson.D{{"claim_id", claimID}, {"visible_at", now.Add(lease)}}},
-    {"$inc", bson.D{{"attempts", 1}}},
-}
+update := mongo.Pipeline{{{"$set", bson.D{
+    {"claim_id", bson.D{{"$literal", claimID}}},
+    {"visible_at", bson.D{{"$add", bson.A{"$$NOW", leaseMs}}}},
+    {"attempts", bson.D{{"$add", bson.A{"$attempts", 1}}}},
+}}}}
 // no document matched => ErrNoJob
 ```
 
@@ -325,9 +327,57 @@ retry policy stays above the primitive.
 extend`), not from the current `visible_at`, so repeated heartbeats cannot
 stack extensions into the far future.
 
-**Implementation notes.** Compute `now` from **server time** (ideally `$$NOW` in
-a pipeline update) so clock-skewed nodes do not steal early or late. Promote
+**Implementation notes.** Compute `now` from **server time** — `$$NOW` in a
+pipeline update, which is required, not optional — so clock-skewed nodes do
+not steal early or late. Promote
 `lease` to a `ClaimOpts` struct only when a second per-claim knob appears.
+
+**Lease contracts (settled in Phase 4).**
+
+- **Validation.** `lease <= 0` on Claim and `extend <= 0` on Heartbeat return
+  `ErrInvalidLease`; `delay < 0` on Release returns `ErrInvalidDelay`. All are
+  checked on the original duration before any round trip.
+- **Duration → milliseconds.** BSON dates and `$$NOW` arithmetic are whole
+  milliseconds. One helper converts every lease, extend, and delay: zero
+  stays zero (Release with zero delay is immediately reclaimable); a positive
+  duration rounds **up**, so `1ns` becomes `1ms`, never `0ms`. It computes
+  quotient plus remainder so `math.MaxInt64` nanoseconds does not overflow.
+- **Pipeline updates.** Claim, Heartbeat, Release, Complete, and Cancel all
+  use pipeline updates so `$$NOW` supplies server time. Every caller-supplied
+  or computed string (resolution, claim id) is wrapped in `$literal`: in a
+  pipeline `"$foo"` is a field path and `"$$NOW"` a variable.
+- **Claim id.** `bson.NewObjectID().Hex()` -- 24 lowercase hex characters,
+  never empty. ObjectIDs are predictable; if claim ids ever cross a trust
+  boundary (e.g. completing by claim id over HTTP), switch to 128-bit random
+  ids.
+- **Fenced-write results.** Heartbeat, Release, and Complete guard on
+  `{_id: jobID, claim_id: claimID, liveness: pending}` (no visibility
+  condition: an expired-but-unreclaimed holder still holds the fence). A
+  driver error, including a write-concern error, is returned wrapped and the
+  counts are not inspected. Only an error-free `MatchedCount == 0` means
+  `ErrLeaseLost`; `MatchedCount == 1` is success. `ModifiedCount` is ignored:
+  two heartbeats in the same millisecond write identical values and modify
+  nothing.
+- **`ErrLeaseLost`** means "claim no longer held" -- stolen, released,
+  canceled, already completed, or deleted (TTL). A worker that needs to tell
+  these apart calls `Get`. Repeating Complete or Release after success
+  returns `ErrLeaseLost`; they are not success-idempotent.
+- **Write concern.** Fencing relies on acknowledged writes. The queue does
+  not inspect or override the collection's write concern; unacknowledged
+  write concern breaks fencing, and single-resolution across failover
+  requires `w: majority` (a `w: 1` write can roll back). Caller's choice,
+  documented on `New`.
+- **Handle state.** A `ClaimedJob` is an immutable claim-time snapshot;
+  Heartbeat, Release, and Complete do not update its fields (use `Get` for
+  fresh state). The job id and fence are captured in unexported fields, so
+  mutating the exported `Job.ID` or `Job.ClaimID` has no effect on later
+  operations. Handle methods read only immutable private state and are safe
+  to call concurrently (a heartbeat goroutine plus the worker's Complete).
+- **Context and errors.** The caller's `ctx` reaches every driver call; the
+  library has no retry loops. Driver errors are wrapped with `%w`. A context
+  timeout or network error leaves the write outcome unknown -- `Get` shows
+  current state but cannot prove which call caused it. Errors return a nil
+  `*Job` / `*ClaimedJob`.
 
 ## Resolution: Complete vs Cancel
 
@@ -352,6 +402,25 @@ design:
 The terminal write (complete or cancel) sets `resolved_at`, the durable key
 GC ages on.
 
+**Resolution contracts (settled in Phase 4).**
+
+- Complete is a fenced write with the result handling above: a fence miss
+  returns `ErrLeaseLost`. The resolution is wrapped in `$literal` in the
+  pipeline update.
+- Cancel with an empty job id returns `ErrMissingJobID` before any round
+  trip. When its pending-liveness guard matches nothing, a diagnostic read
+  distinguishes the cases: a missing job returns `ErrJobNotFound`; a job
+  seen resolved returns `ErrJobResolved`. A job seen pending also returns
+  `ErrJobResolved`: reachable only if the target resolved, was TTL-deleted,
+  and a new job reused the id between update and read, so the record the
+  update missed was resolved (no retry against what may be a different
+  job). Cancel leaves `claim_id` intact. `ErrJobResolved` means "observed
+  resolved at the read", not "your cancel won" -- a caller that needs to
+  know whether the job was canceled inspects `Resolution` via `Get`.
+- Cancel's diagnostic read and `Get` use primary read preference (a
+  collection clone with `readpref.Primary()`, built once in `New`) so a
+  secondary cannot return a stale record.
+
 A resolution is terminal. A failure the caller intends to retry is a
 `Release`, not a `Complete` with a "failed"-style resolution — retry policy
 lives above the primitive, and a resolved job never re-enters the visible
@@ -365,7 +434,9 @@ func (q *Queue) Get(ctx context.Context, jobID string) (*Job, error)
 
 The resolution-lookup path the generic design promises: a snapshot read by
 job id, the caller's way to poll how a job ended. Returns a not-found
-sentinel for an unknown id.
+sentinel for an unknown id. An empty id returns `ErrMissingJobID` before any
+round trip; only `mongo.ErrNoDocuments` maps to `ErrJobNotFound`, and other
+errors pass through wrapped.
 
 ## Indexes, contention, and GC
 
@@ -374,6 +445,26 @@ sentinel for an unknown id.
 sort; `visible_at` rides in the index so the visibility predicate filters
 in-index without fetching documents. The leased low-vstamp prefix is still
 scanned past on every claim, but as index entries only.
+
+**Explain check (2026-10-09, MongoDB 8.2.11).** One partition seeded with
+10,000 pending jobs at low vstamps with `visible_at` a year in the future,
+then 100 visible pending jobs at higher vstamps; explain (`executionStats`)
+on the exact claim `findAndModify` (same filter including
+`$expr: {$lte: ["$visible_at", "$$NOW"]}`, `(vstamp, _id)` sort, pipeline
+update). Winning plan: `UPDATE` ← `LIMIT 1` ← `FETCH` (residual `$expr`
+filter) ← `IXSCAN` on `partition_1_liveness_1_vstamp_1__id_1_visible_at_1`,
+bounds `partition ["default"]`, `liveness ["pending"]`, `vstamp`/`_id`
+`[MinKey, MaxKey]`, `visible_at [MinKey, <$$NOW>]`. No blocking `SORT` stage.
+`totalKeysExamined` 10,001, `totalDocsExamined` 1, `nReturned` 1.
+
+Interpretation: the planner folds `$$NOW` to a constant and pushes the
+visibility predicate into the index bounds on `visible_at`, so the invisible
+block is rejected as index keys without fetching documents — exactly one
+document is fetched (the claimed one). The sort is satisfied by index order.
+Because `visible_at` trails `vstamp` and `_id`, its bound cannot narrow the
+scan range, so keys examined grow linearly with the leased/delayed
+low-vstamp prefix; this is the expected cost of the design, paid in index
+entries rather than document fetches.
 
 **Contention stance.** Concurrent claimers all target the same minimum
 visible document; one wins and the rest retry server-side on write conflict.

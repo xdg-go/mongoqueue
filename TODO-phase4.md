@@ -170,27 +170,27 @@ duration (lease, extend, delay) with one helper:
 Storage behavior #3: one atomic `FindOneAndUpdate` with a pipeline update so
 `now` is server time.
 
-- [ ] Record the 4.0 contracts in mongodb-go-library-design.md (Claim API
+- [x] Record the 4.0 contracts in mongodb-go-library-design.md (Claim API
   and Resolution sections); fix the stale `Cancel(ctx, jobID, r)` signature
   in implementation-plan.md 4.3 to `Cancel(ctx, jobID)`
-- [ ] Add `ErrLeaseLost`, `ErrJobResolved`, `ErrInvalidLease` to errors.go;
+- [x] Add `ErrLeaseLost`, `ErrJobResolved`, `ErrInvalidLease` to errors.go;
   widen `ErrInvalidDelay` and `ErrMissingJobID` godoc
-- [ ] Duration→ms helper per 4.0
-- [ ] `func (q *Queue) Claim(ctx, partition string, lease time.Duration)
+- [x] Duration→ms helper per 4.0
+- [x] `func (q *Queue) Claim(ctx, partition string, lease time.Duration)
   (*ClaimedJob, error)`; empty partition name maps to `defaultPartition`,
   same as enqueue
-- [ ] Filter: `partition`, `liveness: pending`, and visibility against
+- [x] Filter: `partition`, `liveness: pending`, and visibility against
   server time (`$expr: {$lte: ["$visible_at", "$$NOW"]}`)
-- [ ] Sort `{vstamp: 1, _id: 1}`; `ReturnDocument(After)`
-- [ ] Pipeline update: `claim_id = {$literal: <minted>}`,
+- [x] Sort `{vstamp: 1, _id: 1}`; `ReturnDocument(After)`
+- [x] Pipeline update: `claim_id = {$literal: <minted>}`,
   `visible_at = $$NOW + leaseMs`, `attempts = attempts + 1`
-- [ ] Map `mongo.ErrNoDocuments` to `ErrNoJob` (not wrapped)
-- [ ] `ClaimedJob` type per 4.0 handle contract: promoted `Job`;
+- [x] Map `mongo.ErrNoDocuments` to `ErrNoJob` (not wrapped)
+- [x] `ClaimedJob` type per 4.0 handle contract: promoted `Job`;
   unexported `q *Queue`, `jobID string`, `claimID string`; `ClaimID()`
   accessor; godoc stating the snapshot is immutable and mutating exported
   fields changes nothing server-side
-- [ ] Primary-read collection clone on `Queue` (used by 4.3)
-- [ ] **Explain check** (one-off, record results in the design doc's
+- [x] Primary-read collection clone on `Queue` (used by 4.3)
+- [x] **Explain check** (one-off, record results in the design doc's
   "Indexes, contention, and GC" section). Seed a partition with a large
   block (e.g. 10k) of invisible low-vstamp jobs followed by visible
   higher-vstamp jobs; run explain on the exact `findAndModify`. Record
@@ -199,25 +199,25 @@ Storage behavior #3: one atomic `FindOneAndUpdate` with a pipeline update so
   `$expr` predicate is evaluated after fetch, contradicting the
   `EnsureIndexes` godoc: stop and raise it with the user. Do not switch to
   client time as a fix.
-- [ ] **Test**: unit -- duration→ms table: `0`, `1ns`, `999µs`, `1ms`,
+- [x] **Test**: unit -- duration→ms table: `0`, `1ns`, `999µs`, `1ms`,
   `1500µs`, `math.MaxInt64`; `lease <= 0` rejected before any round trip
-- [ ] **Test**: integration -- claims lowest `(vstamp, _id)`; equal vstamps
+- [x] **Test**: integration -- claims lowest `(vstamp, _id)`; equal vstamps
   across tenants break ties by `_id`
-- [ ] **Test**: integration -- claimed record has the minted `claim_id`,
+- [x] **Test**: integration -- claimed record has the minted `claim_id`,
   `visible_at` within server-time bounds of `now + lease`, `attempts == 1`,
   unchanged `vstamp`, liveness still pending
-- [ ] **Test**: integration -- job with `visible_at` minutes in the future
+- [x] **Test**: integration -- job with `visible_at` minutes in the future
   is skipped; resolved jobs (written directly as fixtures) are skipped
-- [ ] **Test**: integration -- partition with no jobs yields `ErrNoJob`;
+- [x] **Test**: integration -- partition with no jobs yields `ErrNoJob`;
   claim in partition A never returns a job from partition B
-- [ ] **Test**: integration -- partition name `""` and `"default"` both
+- [x] **Test**: integration -- partition name `""` and `"default"` both
   claim a job enqueued with empty `Partition`
-- [ ] **Test**: race -- N goroutines, one Claim each, against M jobs
+- [x] **Test**: race -- N goroutines, one Claim each, against M jobs
   (N > M), 1-minute lease: exactly M successes with distinct job ids and
   N−M `ErrNoJob`
-- [ ] **Test**: integration -- claim id is 24-char hex, non-empty, and
+- [x] **Test**: integration -- claim id is 24-char hex, non-empty, and
   differs between two claims (smoke test only)
-- [ ] **Test**: unit -- mutating exported `Job.ID`/`Job.ClaimID` on a
+- [x] **Test**: unit -- mutating exported `Job.ID`/`Job.ClaimID` on a
   handle does not change its private fence or job id
 
 ## 4.2 Lease maintenance
