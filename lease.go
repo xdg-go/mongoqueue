@@ -57,7 +57,8 @@ func (c *ClaimedJob) Release(ctx context.Context, delay time.Duration) error {
 // guarded on the job id and fence captured at claim time and on pending
 // liveness. There is no visibility condition: an expired but unreclaimed
 // lease still holds the fence. MatchedCount, not ModifiedCount, decides the
-// outcome: two writes in the same millisecond match but modify nothing.
+// outcome: a write that stores values identical to the current ones (two
+// heartbeats in the same millisecond) matches but modifies nothing.
 func (c *ClaimedJob) fencedUpdate(ctx context.Context, op string, set bson.D) error {
 	filter := bson.D{
 		{Key: "_id", Value: c.jobID},

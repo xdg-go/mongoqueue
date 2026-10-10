@@ -11,17 +11,18 @@ import (
 	"github.com/xdg-go/mongoqueue/internal/mongotest"
 )
 
-// forceVisibleAt writes visible_at directly, so tests expire leases or end
-// delays without sleeping.
-func forceVisibleAt(ctx context.Context, t *testing.T, q *Queue, id string, at time.Time) {
+// expireLease writes cj's job visible_at an hour into the past, so tests
+// expire leases or end delays without sleeping.
+func expireLease(ctx context.Context, t *testing.T, q *Queue, cj *ClaimedJob) {
 	t.Helper()
-	res, err := q.coll.UpdateOne(ctx, bson.D{{Key: "_id", Value: id}},
-		bson.D{{Key: "$set", Value: bson.D{{Key: "visible_at", Value: at}}}})
+	past := time.Now().Add(-time.Hour)
+	res, err := q.coll.UpdateOne(ctx, bson.D{{Key: "_id", Value: cj.jobID}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "visible_at", Value: past}}}})
 	if err != nil {
-		t.Fatalf("force visible_at on %q: %v", id, err)
+		t.Fatalf("expire lease on %q: %v", cj.jobID, err)
 	}
 	if res.MatchedCount != 1 {
-		t.Fatalf("force visible_at on %q: matched %d, want 1", id, res.MatchedCount)
+		t.Fatalf("expire lease on %q: matched %d, want 1", cj.jobID, res.MatchedCount)
 	}
 }
 
@@ -93,7 +94,7 @@ func TestHeartbeatAfterUnreclaimedExpiry(t *testing.T) {
 	ctx := opCtx(t)
 	q := New(db.Collection("jobs"))
 	cj := claimOne(ctx, t, q)
-	forceVisibleAt(ctx, t, q, "j1", time.Now().Add(-time.Hour))
+	expireLease(ctx, t, q, cj)
 
 	lo := serverNow(ctx, t, db)
 	if err := cj.Heartbeat(ctx, time.Minute); err != nil {
@@ -114,7 +115,7 @@ func TestLeaseLostAfterReclaim(t *testing.T) {
 	ctx := opCtx(t)
 	q := New(db.Collection("jobs"))
 	old := claimOne(ctx, t, q)
-	forceVisibleAt(ctx, t, q, "j1", time.Now().Add(-time.Hour))
+	expireLease(ctx, t, q, old)
 	reclaimed := mustClaim(ctx, t, q, "")
 	before := findJob(ctx, t, q, "j1")
 
@@ -182,7 +183,7 @@ func TestReleaseDelayHidesJob(t *testing.T) {
 	}
 	assertNoJob(ctx, t, q, "")
 
-	forceVisibleAt(ctx, t, q, "j1", time.Now().Add(-time.Hour))
+	expireLease(ctx, t, q, cj)
 	if got := mustClaim(ctx, t, q, ""); got.ID != "j1" {
 		t.Errorf("claimed %q, want j1", got.ID)
 	}

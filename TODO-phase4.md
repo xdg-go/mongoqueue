@@ -259,11 +259,11 @@ virtual-time event.
 Terminal writes set `liveness: resolved`, `resolution`, and
 `resolved_at = $$NOW`. A resolved job never re-enters the visible set.
 
-- [ ] `(c *ClaimedJob) Complete(ctx, r Resolution) error`: empty `r` →
+- [x] `(c *ClaimedJob) Complete(ctx, r Resolution) error`: empty `r` →
   `ErrEmptyResolution` before any round trip; guard
   `{_id, claim_id, liveness: pending}`; `resolution: {$literal: r}`;
   result handling per 4.0
-- [ ] `func (q *Queue) Cancel(ctx, jobID string) error`: guard
+- [x] `func (q *Queue) Cancel(ctx, jobID string) error`: guard
   `{_id, liveness: pending}` only; writes `ResolutionCanceled`; leaves
   `claim_id` intact. On `MatchedCount == 0`, one primary read classifies:
   absent → `ErrJobNotFound`; resolved → `ErrJobResolved`; pending →
@@ -273,28 +273,28 @@ Terminal writes set `liveness: resolved`, `resolution`, and
   pending). The record the update missed was resolved, so report that; do
   not retry the update against what may be a different job. Document all
   three outcomes in godoc.
-- [ ] `func (q *Queue) Get(ctx, jobID string) (*Job, error)`: primary read
+- [x] `func (q *Queue) Get(ctx, jobID string) (*Job, error)`: primary read
   by `_id`; per 4.0 error rules
-- [ ] **Test**: unit -- `Complete("")` returns `ErrEmptyResolution`;
+- [x] **Test**: unit -- `Complete("")` returns `ErrEmptyResolution`;
   `Get("")` and `Cancel("")` return `ErrMissingJobID`
-- [ ] **Test**: integration -- Complete sets resolved, resolution,
+- [x] **Test**: integration -- Complete sets resolved, resolution,
   `resolved_at` within server-time bounds; `vstamp` unchanged; job never
   claimable again
-- [ ] **Test**: integration -- resolutions `"$foo"` and `"$$NOW"`
+- [x] **Test**: integration -- resolutions `"$foo"` and `"$$NOW"`
   round-trip through Get as exact strings (stored BSON type string)
-- [ ] **Test**: integration -- second Complete on the same handle returns
+- [x] **Test**: integration -- second Complete on the same handle returns
   `ErrLeaseLost`
-- [ ] **Test**: integration -- Complete after the same handle's Release
+- [x] **Test**: integration -- Complete after the same handle's Release
   returns `ErrLeaseLost`; job stays pending
-- [ ] **Test**: integration -- holder whose lease expired (forced) but was
+- [x] **Test**: integration -- holder whose lease expired (forced) but was
   not reclaimed can still Complete
-- [ ] **Test**: integration -- Cancel of a claimed job resolves it with
+- [x] **Test**: integration -- Cancel of a claimed job resolves it with
   `ResolutionCanceled` and preserves the holder's non-empty `claim_id`;
   holder's next Heartbeat, Release, and Complete each return
   `ErrLeaseLost`
-- [ ] **Test**: integration -- Cancel of a resolved id → `ErrJobResolved`;
+- [x] **Test**: integration -- Cancel of a resolved id → `ErrJobResolved`;
   unknown id → `ErrJobNotFound`
-- [ ] **Test**: integration -- Get returns the stored record; mutating the
+- [x] **Test**: integration -- Get returns the stored record; mutating the
   returned `Job` and calling Get again shows the stored values; unknown id
   → `ErrJobNotFound`
 
