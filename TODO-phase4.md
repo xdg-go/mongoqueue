@@ -227,30 +227,30 @@ pending}`. No visibility condition in the guard: a holder whose lease
 expired but was not reclaimed still holds the fence. Neither operation is a
 virtual-time event.
 
-- [ ] `(c *ClaimedJob) Heartbeat(ctx, extend time.Duration) error`:
+- [x] `(c *ClaimedJob) Heartbeat(ctx, extend time.Duration) error`:
   `visible_at = $$NOW + extendMs` (from server now, not from current
   `visible_at`, so heartbeats cannot stack)
-- [ ] `(c *ClaimedJob) Release(ctx, delay time.Duration) error`:
+- [x] `(c *ClaimedJob) Release(ctx, delay time.Duration) error`:
   `visible_at = $$NOW + delayMs` and set `claim_id` to `""`
-- [ ] Result handling per 4.0 (driver error first; `MatchedCount == 0` →
+- [x] Result handling per 4.0 (driver error first; `MatchedCount == 0` →
   `ErrLeaseLost`; ignore `ModifiedCount`)
-- [ ] **Test**: unit -- `extend <= 0` → `ErrInvalidLease`; `delay < 0` →
+- [x] **Test**: unit -- `extend <= 0` → `ErrInvalidLease`; `delay < 0` →
   `ErrInvalidDelay`; both before any round trip
-- [ ] **Test**: integration -- heartbeat sets `visible_at` within
+- [x] **Test**: integration -- heartbeat sets `visible_at` within
   server-time bounds of `now + extend`; two back-to-back heartbeats both
   succeed (same-millisecond case) and do not stack; `vstamp` unchanged
-- [ ] **Test**: integration -- holder whose lease expired (forced) but was
+- [x] **Test**: integration -- holder whose lease expired (forced) but was
   not reclaimed can still Heartbeat successfully
-- [ ] **Test**: integration -- after forced expiry and reclaim by another
+- [x] **Test**: integration -- after forced expiry and reclaim by another
   handle, the old holder's Heartbeat and Release both return
   `ErrLeaseLost` and leave `visible_at` and `claim_id` unchanged
-- [ ] **Test**: integration -- released job has `claim_id == ""`; with
+- [x] **Test**: integration -- released job has `claim_id == ""`; with
   zero delay it is immediately reclaimable, and the reclaim increments
   `attempts`, mints a new claim id, keeps `vstamp`
-- [ ] **Test**: integration -- job released with a multi-minute delay
+- [x] **Test**: integration -- job released with a multi-minute delay
   returns `ErrNoJob` on Claim; after forcing `visible_at` into the past it
   is claimable
-- [ ] **Test**: integration -- releaser's later Heartbeat returns
+- [x] **Test**: integration -- releaser's later Heartbeat returns
   `ErrLeaseLost` and does not change `visible_at` (no un-release); second
   Release also returns `ErrLeaseLost`
 
