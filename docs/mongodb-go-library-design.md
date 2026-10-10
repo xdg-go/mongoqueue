@@ -367,6 +367,13 @@ not steal early or late. Promote
   write concern breaks fencing, and single-resolution across failover
   requires `w: majority` (a `w: 1` write can roll back). Caller's choice,
   documented on `New`.
+- **Collation and zero values.** The collection's default collation must be
+  simple (binary); a non-simple collation makes partition matching and the
+  `_id` tie-break follow it (case-insensitive matches partition `"A"` to
+  `"a"`). The client must not use `BSONOptions.OmitEmpty` or equivalent: the
+  envelope relies on stored zero values (`attempts: 0`, `vstamp: 0`), and
+  omitting them breaks attempt counting and claim ordering. Documented on
+  `New`, not detected.
 - **Handle state.** A `ClaimedJob` is an immutable claim-time snapshot;
   Heartbeat, Release, and Complete do not update its fields (use `Get` for
   fresh state). The job id and fence are captured in unexported fields, so
@@ -411,12 +418,15 @@ GC ages on.
   trip. When its pending-liveness guard matches nothing, a diagnostic read
   distinguishes the cases: a missing job returns `ErrJobNotFound`; a job
   seen resolved returns `ErrJobResolved`. A job seen pending also returns
-  `ErrJobResolved`: reachable only if the target resolved, was TTL-deleted,
-  and a new job reused the id between update and read, so the record the
-  update missed was resolved (no retry against what may be a different
-  job). Cancel leaves `claim_id` intact. `ErrJobResolved` means "observed
-  resolved at the read", not "your cancel won" -- a caller that needs to
-  know whether the job was canceled inspects `Resolution` via `Get`.
+  `ErrJobResolved` (no retry against what may be a different job): a
+  pending record at the read means the update missed and the id was then
+  (re)inserted -- the target resolved, was TTL-deleted, and the id was
+  reused, or the id did not exist yet and a concurrent first enqueue
+  inserted it. Cancel leaves `claim_id` intact. `ErrJobResolved` means the
+  pending-only update matched nothing while a record with that id existed
+  at the diagnostic read; it does not prove that job (or the record now
+  present) was resolved by anyone in particular, nor that your cancel won
+  -- a caller that needs to know inspects `Resolution` via `Get`.
 - Cancel's diagnostic read and `Get` use primary read preference (a
   collection clone with `readpref.Primary()`, built once in `New`) so a
   secondary cannot return a stale record.

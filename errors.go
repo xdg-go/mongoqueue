@@ -27,9 +27,10 @@ var ErrJobNotFound = errors.New("mongoqueue: job not found")
 // record.
 var ErrLeaseLost = errors.New("mongoqueue: lease lost")
 
-// ErrJobResolved signals a Cancel whose diagnostic read observed the job
-// already resolved. It means "resolved at the read", not "this cancel won";
-// a caller that needs to know whether the job was canceled inspects
+// ErrJobResolved signals a Cancel whose pending-only update matched nothing
+// while a record with that id existed at the diagnostic read. It does not
+// prove the job (or the record now present) was resolved by anyone in
+// particular, nor that this cancel won; a caller that needs to know inspects
 // Resolution via Get.
 var ErrJobResolved = errors.New("mongoqueue: job already resolved")
 

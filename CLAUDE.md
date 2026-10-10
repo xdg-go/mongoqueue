@@ -49,6 +49,11 @@ the caller above the primitive.
   queue-level (external caller, no lease, guards on pending liveness alone).
   `Release` (early nack with caller-chosen delay) clears the fence -- the one
   transition that would otherwise leave a stale claim id live.
+- **Caller configuration is documented, not defended.** The caller supplies
+  the client and collection. Settings that break queue assumptions (e.g.
+  `BSONOptions.OmitEmpty`, non-simple default collation, unacknowledged write
+  concern) are stated as requirements in godoc and the design doc. Do not add
+  code to detect, override, or tolerate them.
 
 ## Documentation index
 

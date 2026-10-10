@@ -55,6 +55,13 @@ func WithNodeID(id string) Option {
 // unacknowledged write concern (w: 0) breaks fencing, because a fence miss
 // cannot be observed. Single resolution across a failover requires
 // w: "majority"; a w: 1 write can roll back, letting a second resolution win.
+//
+// The queue also requires coll's default collation to be simple (binary): a
+// non-simple collation makes partition matching and the _id tie-break follow
+// it (a case-insensitive one matches partition "A" to "a"). The client must
+// not omit empty values (BSONOptions.OmitEmpty or equivalent): the envelope
+// relies on zero values such as attempts: 0 and vstamp: 0 being stored, and
+// omitting them breaks attempt counting and claim ordering.
 func New(coll *mongo.Collection, opts ...Option) *Queue {
 	q := &Queue{
 		coll:   coll,

@@ -39,16 +39,17 @@ func (c *ClaimedJob) Complete(ctx context.Context, r Resolution) error {
 //
 //   - absent: ErrJobNotFound.
 //   - resolved: ErrJobResolved.
-//   - pending: ErrJobResolved. This is reachable only if the targeted job
-//     resolved, was TTL-deleted, and a new job reused the id between the
-//     update and the read. The record the update missed was resolved, so
-//     Cancel reports that rather than retrying against what may be a
-//     different job.
+//   - pending: ErrJobResolved, without retrying against what may be a
+//     different job. The id was inserted after the update missed: either
+//     the target resolved, was TTL-deleted, and the id was reused, or the
+//     id did not exist yet and a concurrent first enqueue inserted it.
 //
-// ErrJobResolved means "observed resolved at the read", not "your cancel
-// won"; a caller that needs to know whether the job was canceled inspects
-// Resolution via Get. Other errors wrap the driver error; a context timeout
-// or network error leaves the outcome unknown.
+// ErrJobResolved means the pending-only update matched nothing while a
+// record with that id existed at the read. It does not prove that job (or
+// the record now present) was resolved by anyone in particular, nor that
+// this cancel won; a caller that needs to know inspects Resolution via Get.
+// Other errors wrap the driver error; a context timeout or network error
+// leaves the outcome unknown.
 func (q *Queue) Cancel(ctx context.Context, jobID string) error {
 	if jobID == "" {
 		return ErrMissingJobID

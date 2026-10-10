@@ -85,6 +85,21 @@ func TestHeartbeatExtendsFromServerNow(t *testing.T) {
 	}
 }
 
+// TestFencedUpdateNoOpWriteSucceeds proves a fence-matched write that changes
+// nothing is success: the result check uses MatchedCount, not ModifiedCount.
+func TestFencedUpdateNoOpWriteSucceeds(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	q := New(db.Collection("jobs"))
+	cj := claimOne(ctx, t, q)
+
+	if err := cj.fencedUpdate(ctx, "noop", bson.D{{Key: "attempts", Value: "$attempts"}}); err != nil {
+		t.Fatalf("no-op fenced update: %v", err)
+	}
+}
+
 // TestHeartbeatAfterUnreclaimedExpiry proves an expired lease that nobody
 // reclaimed still holds the fence.
 func TestHeartbeatAfterUnreclaimedExpiry(t *testing.T) {
