@@ -132,34 +132,34 @@ New file `fairness_test.go`. Every test here is sequenced: enqueue all,
 then claim one at a time until `ErrNoJob`, recording `(TenantID, ID)` per
 claim.
 
-- [ ] Helper `drainOrder(ctx, t, q, partition) []string` -- calls
+- [x] Helper `drainOrder(ctx, t, q, partition) []string` -- calls
   `q.Claim(ctx, partition, time.Minute)` until `ErrNoJob`, returns job ids
   in dispatch order; fails on any other error. Do not build it on
   `mustClaim`.
-- [ ] **Test**: equal weight, flooding tenant -- tenant A enqueues 50 jobs
+- [x] **Test**: equal weight, flooding tenant -- tenant A enqueues 50 jobs
   (`a-000`..`a-049`), then tenant B enqueues 5 (`b-000`..`b-004`), all
   cost 1 weight 1. Expected order: `a-000, b-000, a-001, b-001, ...,
   a-004, b-004, a-005, ..., a-049` (ties at each `k * 1e6` break by `_id`,
   `a-` < `b-`). Assert the exact sequence. This proves B is not queued
   behind A's backlog despite enqueuing last.
-- [ ] **Test**: weight 2 vs 1, equal cost -- tenant A weight 2 and tenant
+- [x] **Test**: weight 2 vs 1, equal cost -- tenant A weight 2 and tenant
   B weight 1 each enqueue 30 jobs. Assert the exact dispatch sequence
   derived from 5.0's arithmetic, and additionally that every prefix of
   length `3k` (while both tenants have work) contains exactly `2k` A jobs
   and `k` B jobs.
-- [ ] **Test**: cheap vs expensive, equal weight -- tenant A enqueues 20
+- [x] **Test**: cheap vs expensive, equal weight -- tenant A enqueues 20
   jobs at cost 1, tenant B enqueues 5 jobs at cost 4. Assert exact order:
   A's vstamps are `1e6..20e6`, B's are `4e6, 8e6, ...`; B's jobs land
   after A's 4th, 8th, ... (tie at `4e6` breaks `a-003` before `b-000`).
-- [ ] **Test**: same-tenant cost does not reorder -- one tenant enqueues
+- [x] **Test**: same-tenant cost does not reorder -- one tenant enqueues
   cost 10, then cost 1, then cost 5; dispatch is enqueue order. This guards
   the 5.0 "cross-tenant only" rule.
-- [ ] **Test**: single-tenant degenerate case -- `TenantID` empty for all
+- [x] **Test**: single-tenant degenerate case -- `TenantID` empty for all
   jobs, mixed costs and default weight; dispatch is FIFO by enqueue order,
   and the stored vstamps equal the running sum of strides (the vstamp is an
   enqueue sequence). No special-casing in code to verify; the test shows
   the shared path produces FIFO.
-- [ ] **Test**: partition-scoped ordering over shared tenant timelines --
+- [x] **Test**: partition-scoped ordering over shared tenant timelines --
   vtime is per tenant, not per partition, so a tenant's stamps advance
   across every partition it enqueues into. All cost 1, weight 1, enqueued
   in this exact order: A enqueues `a-000`..`a-003` into `p1`, then `a-004`
@@ -171,7 +171,7 @@ claim.
   `b-000`. This shows ordering within a partition uses the shared tenant
   timeline; it does not claim independent proportional shares per
   partition.
-- [ ] **Test**: race -- two tenants enqueue concurrently (one goroutine
+- [x] **Test**: race -- two tenants enqueue concurrently (one goroutine
   per tenant, ids `a-000`..`a-049` and `b-000`..`b-049`, cost 1, weight
   1), then drain. Per-tenant vstamps depend only on each tenant's own
   enqueue count, so the order is exactly `a-000, b-000, a-001, b-001, ...,
