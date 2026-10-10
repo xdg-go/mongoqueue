@@ -303,16 +303,16 @@ Terminal writes set `liveness: resolved`, `resolution`, and
 Cross-operation invariants from the generic design's "Termination,
 cancellation, and races" and "Reclaim by expiry".
 
-- [ ] **Test**: integration -- steal then late Complete: A's lease forced
+- [x] **Test**: integration -- steal then late Complete: A's lease forced
   expired, B claims; A's Complete → `ErrLeaseLost`, B's succeeds; exactly
   one resolution recorded
-- [ ] **Test**: race -- concurrent Complete (holder) vs Cancel (external)
+- [x] **Test**: race -- concurrent Complete (holder) vs Cancel (external)
   on one job, repeated many iterations: exactly one returns nil each time,
   and the stored resolution matches the winner
-- [ ] **Test**: race -- holder's Complete vs reclaim after forced expiry:
+- [x] **Test**: race -- holder's Complete vs reclaim after forced expiry:
   valid outcomes are (a) Complete wins and Claim returns `ErrNoJob` or
   (b) Claim wins and Complete returns `ErrLeaseLost`; never both succeed
-- [ ] **Test**: integration -- end-to-end smoke: enqueue via `Kind[T]`,
+- [x] **Test**: integration -- end-to-end smoke: enqueue via `Kind[T]`,
   claim, `Decode`, heartbeat, complete, `Get` shows the resolution
 
 ---
