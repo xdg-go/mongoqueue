@@ -185,7 +185,7 @@ claim.
 `TestClaimPartitionScoping` (Phase 4.1) already proves sequenced scoping.
 This adds only the race counterpart.
 
-- [ ] **Test**: race -- seed partitions `p1` and `p2` with M jobs each
+- [x] **Test**: race -- seed partitions `p1` and `p2` with M jobs each
   (job ids encode the partition, e.g. `p1-000`); run N goroutines per
   partition (N > M), each claiming once from its partition with a
   one-minute lease. Assert every returned job's `Partition` matches the

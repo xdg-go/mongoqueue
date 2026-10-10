@@ -3,6 +3,7 @@ package mongoqueue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"sync"
 	"testing"
@@ -234,6 +235,78 @@ func TestClaimPartitionScoping(t *testing.T) {
 
 	if got := mustClaim(ctx, t, q, "B").ID; got != "b1" {
 		t.Fatalf("claim in B = %q, want b1", got)
+	}
+}
+
+// TestRaceClaimPartitionScoping is the race counterpart of
+// TestClaimPartitionScoping: more claimers than jobs race in each of two
+// partitions, and no claim crosses a partition. Each partition yields
+// exactly its own jobs, once each, and the surplus claimers get ErrNoJob.
+func TestRaceClaimPartitionScoping(t *testing.T) {
+	t.Parallel()
+
+	const jobsPerPartition, claimersPerPartition = 5, 12
+	partitions := []string{"p1", "p2"}
+	db := mongotest.Connect(t)
+	ctx := raceCtx(t)
+	q := New(db.Collection("jobs"))
+	for _, p := range partitions {
+		for i := range jobsPerPartition {
+			enqueueJob(ctx, t, q, EnqueueOpts{JobID: fmt.Sprintf("%s-%03d", p, i), TenantID: "t1", Partition: p})
+		}
+	}
+
+	type result struct {
+		claimer   string // partition the goroutine claimed from
+		id        string
+		partition string // partition of the returned job
+		err       error
+	}
+	results := make(chan result, len(partitions)*claimersPerPartition)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, p := range partitions {
+		for range claimersPerPartition {
+			wg.Go(func() {
+				<-start
+				cj, err := q.Claim(ctx, p, time.Minute)
+				if err != nil {
+					results <- result{claimer: p, err: err}
+					return
+				}
+				results <- result{claimer: p, id: cj.ID, partition: cj.Partition}
+			})
+		}
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	seen := map[string]map[string]bool{}
+	noJob := map[string]int{}
+	for _, p := range partitions {
+		seen[p] = map[string]bool{}
+	}
+	for r := range results {
+		switch {
+		case errors.Is(r.err, ErrNoJob):
+			noJob[r.claimer]++
+		case r.err != nil:
+			t.Errorf("unexpected claim error in %s: %v", r.claimer, r.err)
+		case r.partition != r.claimer:
+			t.Errorf("claim in %s returned job %q from partition %q", r.claimer, r.id, r.partition)
+		case seen[r.claimer][r.id]:
+			t.Errorf("job %q claimed twice", r.id)
+		default:
+			seen[r.claimer][r.id] = true
+		}
+	}
+	for _, p := range partitions {
+		t.Logf("%s: successes = %d, ErrNoJob = %d", p, len(seen[p]), noJob[p])
+		if len(seen[p]) != jobsPerPartition || noJob[p] != claimersPerPartition-jobsPerPartition {
+			t.Errorf("%s: successes = %d, ErrNoJob = %d; want %d and %d",
+				p, len(seen[p]), noJob[p], jobsPerPartition, claimersPerPartition-jobsPerPartition)
+		}
 	}
 }
 
