@@ -484,27 +484,34 @@ write concern, so the server default `w: "majority"` applies. Host: Apple M4,
 by an immediate Complete, run by G concurrent workers on one partition, so
 the leased prefix stays near G entries. It does not measure claims against a
 large in-flight leased prefix; the explain check above covers that scan cost.
+Each sub-benchmark opens a fresh client and the warm-up opens one
+connection, so pool ramp-up to G connections falls inside the timed region;
+the numbers include it rather than reflecting steady state.
 
-| G (workers) | cycles/s (median) | wall ms per cycle |
-|------------:|------------------:|------------------:|
-| 1           | 56.1              | 17.8              |
-| 4           | 227.1             | 4.4               |
-| 16          | 759.2             | 1.3               |
-| 64          | 1388              | 0.7               |
+| G (workers) | cycles/s (median) | wall ms per cycle | write conflicts per claim |
+|------------:|------------------:|------------------:|--------------------------:|
+| 1           | 56.1              | 17.8              | 0                         |
+| 4           | 227.1             | 4.4               | 0.3                       |
+| 16          | 759.2             | 1.3               | 7.1                       |
+| 64          | 1388              | 0.7               | 9.0                       |
 
 Wall ms per cycle is elapsed time divided by cycles (1000 / throughput), not
 per-worker latency: at G = 64 each worker spends about 46 ms per cycle.
 Run-to-run spread is small (widest: G = 4 ranged 204-231). G ≥ 4 meets the
 "low hundreds of claims/sec per partition" target; G = 1 falls below 100.
-A single worker cannot contend, so the G = 1 rate is pure per-operation
-latency: about 18 ms per cycle, or roughly 9 ms for each of its two
-`w: "majority"` writes (Claim and Complete). That is consistent with each
-acknowledged write waiting on a journal flush on this host, a likely
-explanation that was not separately measured. Throughput scales nearly
-linearly through G = 16 (4 workers ≈ 4.0×, 16 ≈ 13.5× the G = 1 rate), so
-contention on the minimum document costs little at those levels. Scaling
-flattens above that (64 ≈ 24.7×); this run does not separate min-document
-contention from client or server concurrency limits.
+Write conflicts per claim come from a separate run of each sub-benchmark,
+reading `serverStatus().metrics.operation.writeConflicts` before and after.
+
+At G = 1 there is no contention; one cycle (two `w: "majority"` writes) takes
+about 18 ms. Claim and Complete latencies were not measured separately; a
+journal flush per acknowledged write is a likely cause, also not measured.
+At G ≥ 16 the minimum document is heavily contended: each claim retries
+about 7-9 times server-side on write conflict. Throughput still scales
+(4 workers ≈ 4.0×, 16 ≈ 13.5×, 64 ≈ 24.7× the G = 1 rate), consistent with
+those retries completing within the acknowledgment wait that concurrent
+workers overlap. Aggregate throughput therefore does not measure contention cost.
+On storage with faster acknowledgment, the retries would be a larger share
+of each cycle, and this setup cannot predict the resulting ceiling.
 
 **Contention stance.** Concurrent claimers all target the same minimum
 visible document; one wins and the rest retry server-side on write conflict.

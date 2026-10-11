@@ -38,7 +38,8 @@ func benchClaimComplete(b *testing.B, workers int) {
 	}
 	seedPendingJobs(ctx, b, q, b.N)
 
-	// Warm the connection pool so connection setup is outside the timer.
+	// Open one connection before timing. The pool still ramps up to the
+	// worker count inside the timed region; results include that ramp-up.
 	if err := db.Client().Ping(ctx, nil); err != nil {
 		b.Fatalf("warm-up ping: %v", err)
 	}
