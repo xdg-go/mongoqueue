@@ -4,8 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
+	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/xdg-go/mongoqueue/internal/mongotest"
 )
@@ -24,7 +30,7 @@ func assertVStamp(ctx context.Context, t *testing.T, q *Queue, id string, want i
 
 func mustReconcile(ctx context.Context, t *testing.T, q *Queue) {
 	t.Helper()
-	if err := q.reconcile(ctx); err != nil {
+	if err := q.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 }
@@ -120,7 +126,7 @@ func TestReconcileDoneContextLeavesCacheUntouched(t *testing.T) {
 
 	doneCtx, cancel := context.WithCancel(ctx)
 	cancel()
-	if err := q.reconcile(doneCtx); !errors.Is(err, context.Canceled) {
+	if err := q.Reconcile(doneCtx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("reconcile error = %v, want context.Canceled", err)
 	}
 
@@ -296,4 +302,91 @@ func TestLWMOtherLanePendingDoesNotRefund(t *testing.T) {
 
 	want := append([]string{"b-011", "a-f01"}, jobIDs("b", 12, 20)...)
 	assertOrder(t, drainOrder(ctx, t, q, "fast"), want)
+}
+
+// TestReconcileConcurrent runs Reconcile in a loop on several goroutines while
+// two producers enqueue for one tenant in one partition. Under -race this
+// checks Reconcile is safe alongside itself and enqueue, and that the tenant's
+// stamps stay exactly {1..N}x1e6 with no gap or duplicate. Each producer
+// waits after every enqueue until at least one Reconcile has started and
+// finished since, so every stamp after the first is a re-seed and the overlap
+// is guaranteed rather than left to the scheduler.
+func TestReconcileConcurrent(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	q := New(db.Collection("jobs"))
+
+	const producers, perProducer, reconcilers = 2, 25, 4
+	done := make(chan struct{})
+	errs := make(chan error, reconcilers)
+	var passes atomic.Int64 // completed Reconcile calls
+	var reconcileWG sync.WaitGroup
+	for range reconcilers {
+		reconcileWG.Go(func() {
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				if err := q.Reconcile(ctx); err != nil {
+					errs <- err
+					return
+				}
+				passes.Add(1)
+			}
+		})
+	}
+
+	var enqueueWG sync.WaitGroup
+	for p := range producers {
+		enqueueWG.Go(func() {
+			for i := range perProducer {
+				opts := EnqueueOpts{JobID: fmt.Sprintf("a-%d-%03d", p, i), TenantID: "a", Partition: "p", Cost: 1, Weight: 1}
+				if err := q.enqueue(ctx, "test", rawBody(t, bson.D{}), opts); err != nil {
+					t.Errorf("enqueue %q: %v", opts.JobID, err)
+					return
+				}
+				// At most `reconcilers` calls were in flight when after was read,
+				// so the next completion beyond those started after this enqueue.
+				after := passes.Load()
+				for passes.Load() < after+reconcilers+1 {
+					if len(errs) > 0 {
+						return
+					}
+					runtime.Gosched()
+				}
+			}
+		})
+	}
+	enqueueWG.Wait()
+	close(done)
+	reconcileWG.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("Reconcile: %v", err)
+	}
+	if t.Failed() {
+		t.FailNow()
+	}
+
+	var got []int64
+	for p := range producers {
+		for i := range perProducer {
+			id := fmt.Sprintf("a-%d-%03d", p, i)
+			job, err := q.Get(ctx, id)
+			if err != nil {
+				t.Fatalf("get %q: %v", id, err)
+			}
+			got = append(got, job.VStamp)
+		}
+	}
+	slices.Sort(got)
+	for i, v := range got {
+		if want := int64(i+1) * 1_000_000; v != want {
+			t.Fatalf("sorted vstamps[%d] = %d, want %d (all: %v)", i, v, want, got)
+		}
+	}
 }

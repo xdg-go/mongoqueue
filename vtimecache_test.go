@@ -669,6 +669,97 @@ func TestVtimeCacheLWMTracksFrontier(t *testing.T) {
 	}
 }
 
+// TestVtimeCacheLWMPrunedWithPartition verifies that evicting a partition's
+// last cached entry deletes its stored LWM, so a later cold seed there that
+// finds no visible job starts from 0 rather than the stale frontier, while a
+// partition that keeps an entry keeps its LWM.
+func TestVtimeCacheLWMPrunedWithPartition(t *testing.T) {
+	const lwm = int64(10 * scale)
+	ctx := context.Background()
+	frontier, frontierOK := lwm, true
+	c := newVtimeCache()
+	c.lwmHook = func(context.Context, string) (int64, bool, error) {
+		return frontier, frontierOK, nil
+	}
+
+	reserveCommit := func(tenant, partition string) {
+		t.Helper()
+		r, err := c.reserve(ctx, tenant, partition, 1, 1)
+		if err != nil {
+			t.Fatalf("reserve(%q, %q): %v", tenant, partition, err)
+		}
+		r.Commit()
+	}
+
+	reserveCommit("a", "p1")
+	reserveCommit("a", "p2")
+	for _, p := range []string{"p1", "p2"} {
+		if err := c.refreshLWM(ctx, p); err != nil {
+			t.Fatalf("refreshLWM(%q): %v", p, err)
+		}
+	}
+
+	c.invalidateAndEvict()
+	reserveCommit("a", "p1")
+	c.invalidateAndEvict()
+
+	if _, ok := c.tenants[timelineKey{"a", "p2"}]; ok {
+		t.Error("(a, p2) still cached, want evicted")
+	}
+	if _, ok := c.tenants[timelineKey{"a", "p1"}]; !ok {
+		t.Error("(a, p1) evicted, want cached")
+	}
+	if got := c.lwmFor("p2"); got != 0 {
+		t.Errorf("lwmFor(p2) = %d, want 0 (pruned)", got)
+	}
+	if got := c.lwmFor("p1"); got != lwm {
+		t.Errorf("lwmFor(p1) = %d, want %d", got, lwm)
+	}
+
+	frontier, frontierOK = 0, false
+	r, err := c.reserve(ctx, "b", "p2", 1, 1)
+	if err != nil {
+		t.Fatalf("reserve(b, p2): %v", err)
+	}
+	defer r.Abort()
+	if want := int64(1 * scale); r.vstamp != want {
+		t.Errorf("cold (b, p2) vstamp = %d, want %d", r.vstamp, want)
+	}
+}
+
+// TestVtimeCacheLWMPruneSelfHeals verifies a walk drops an LWM re-stored by a
+// late refresh after its partition was pruned.
+func TestVtimeCacheLWMPruneSelfHeals(t *testing.T) {
+	const lwm = int64(10 * scale)
+	ctx := context.Background()
+	c := newVtimeCache()
+	c.lwmHook = func(context.Context, string) (int64, bool, error) {
+		return lwm, true, nil
+	}
+
+	r, err := c.reserve(ctx, "a", "p2", 1, 1)
+	if err != nil {
+		t.Fatalf("reserve(a, p2): %v", err)
+	}
+	r.Commit()
+	c.invalidateAndEvict()
+	c.invalidateAndEvict()
+	if got := c.lwmFor("p2"); got != 0 {
+		t.Fatalf("lwmFor(p2) = %d, want 0 (pruned)", got)
+	}
+
+	if err := c.refreshLWM(ctx, "p2"); err != nil {
+		t.Fatalf("refreshLWM(p2): %v", err)
+	}
+	if got := c.lwmFor("p2"); got != lwm {
+		t.Fatalf("late lwmFor(p2) = %d, want %d", got, lwm)
+	}
+	c.invalidateAndEvict()
+	if got := c.lwmFor("p2"); got != 0 {
+		t.Errorf("lwmFor(p2) after walk = %d, want 0 (pruned)", got)
+	}
+}
+
 // TestVtimeCacheSeedTakesMax verifies a seed takes max(trailing edge, LWM).
 func TestVtimeCacheSeedTakesMax(t *testing.T) {
 	const lwm = int64(10 * scale)
@@ -722,7 +813,7 @@ func TestReconcileFailedRefreshLeavesCacheUntouched(t *testing.T) {
 	}
 
 	failing = true
-	if err := q.reconcile(ctx); err == nil {
+	if err := q.Reconcile(ctx); err == nil {
 		t.Fatal("reconcile with failing lwmHook: got nil error, want failure")
 	}
 

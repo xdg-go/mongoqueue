@@ -210,6 +210,15 @@ target, proving the fairness properties the design promises.
 Resolves open questions #2 (reconciliation/LWM access path) and #3 (surface
 and scheduling). Bounds vtime-cache drift and handles restart/idle correctly.
 
+As built, `TODO.md` reshaped this phase into 6.1 per-(tenant, partition)
+timelines (not in the original plan), 6.2 reconcile, 6.3 LWM, and 6.4
+public surface. Reconcile is lazy invalidation (mark used entries stale so
+each re-seeds on its next enqueue; evict unused ones) instead of an eager
+aggregation that rewrites the cache. "Cache rebuild on startup" is the lazy
+seed: a timeline seeds on its first enqueue, and that cold seed also refreshes
+its partition's frontier. The surface is caller-driven `Reconcile(ctx)`. The
+subsections below are the original plan.
+
 ### 6.1 Reconciliation
 - Per-tenant max-pending-vstamp aggregation; decide and document the
   index/access path and its write-amplification cost

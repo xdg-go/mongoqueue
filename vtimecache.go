@@ -35,8 +35,9 @@ import (
 // Lock order is global mu, then entry mu, then lwmMu. Only eviction holds the
 // global lock while taking an entry lock, and only with TryLock; reserve
 // releases the global lock before taking the entry lock. Only the seed path
-// takes lwmMu under an entry lock. Never acquire in the reverse direction. No
-// I/O is done while holding mu or lwmMu.
+// takes lwmMu under an entry lock, and only the walk takes it under the
+// global lock. Never acquire in the reverse direction. No I/O is done while
+// holding mu or lwmMu.
 type vtimeCache struct {
 	mu      sync.Mutex
 	tenants map[timelineKey]*tenantVtime
@@ -69,8 +70,10 @@ type vtimeCache struct {
 
 	// lwm holds each partition's last computed frontier; a missing key reads
 	// as 0. It is refreshed by a cold seed (refreshLWM before the first seed of
-	// an entry) and by reconcile for every cached partition. lwmMu guards only
-	// this map, never across I/O.
+	// an entry) and by reconcile for every cached partition. A partition's key
+	// is pruned by any reconcile walk that finds no cached entry for it (a late
+	// refresh may re-store a pruned value; the next walk drops it). lwmMu
+	// guards only this map, never across I/O.
 	lwmMu sync.Mutex
 	lwm   map[string]int64
 }
@@ -112,7 +115,9 @@ func newVtimeCache() *vtimeCache {
 // stored value tracks the frontier, dips included (plain overwrite, no max);
 // a computation that finds no visible job (ok false) leaves the prior value.
 // A hook error is returned and nothing is stored. The hook runs without
-// lwmMu held.
+// lwmMu held, so a late refresh may overwrite a newer value with an older one
+// (an accepted, bounded dip), or re-store a value a walk just pruned; the
+// next walk drops it.
 func (c *vtimeCache) refreshLWM(ctx context.Context, partition string) error {
 	if c.lwmHook == nil {
 		return nil
@@ -246,7 +251,10 @@ func (c *vtimeCache) lockTimeline(key timelineKey) *tenantVtime {
 // since the previous walk is marked stale so its next reserve re-seeds; each
 // entry not reserved since then is evicted. It never blocks on an entry lock:
 // a locked entry has an in-flight reservation that will set touched, so it is
-// marked stale instead of evicted. No I/O is done under the global lock.
+// marked stale instead of evicted. After the walk, every partition with no
+// cached entry has its stored LWM pruned, which also drops any value a late
+// refreshLWM re-stored after an earlier prune. No I/O is done under the global
+// lock.
 func (c *vtimeCache) invalidateAndEvict() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -263,6 +271,17 @@ func (c *vtimeCache) invalidateAndEvict() {
 		t.evicted = true
 		t.mu.Unlock()
 	}
+	cached := make(map[string]bool, len(c.tenants))
+	for key := range c.tenants {
+		cached[key.partition] = true
+	}
+	c.lwmMu.Lock()
+	for partition := range c.lwm {
+		if !cached[partition] {
+			delete(c.lwm, partition)
+		}
+	}
+	c.lwmMu.Unlock()
 }
 
 // Commit records a successful insert: the timeline's vtime advances to the

@@ -250,14 +250,28 @@ func (q *Queue) EnsureTTLIndex(ctx context.Context, retention time.Duration) err
 	return nil
 }
 
-// reconcile bounds vtime cache drift. It first refreshes the LWM of every
-// partition present in the cache; then each timeline reserved since the
-// previous reconcile is marked stale, so its next enqueue re-seeds to
-// max(trailing edge, LWM) (picking up other writers' stamps and trailing
-// cancellation refunds), and each timeline idle since then is evicted. A done
-// ctx or a failed LWM refresh returns its error and leaves the cache
-// untouched: no invalidation, no eviction.
-func (q *Queue) reconcile(ctx context.Context) error {
+// Reconcile bounds how far this node's cached virtual times can drift from
+// the stored jobs. Callers must run it periodically, typically on a ticker;
+// the interval is the staleness bound. Each call refreshes the dispatch
+// frontier of every partition in this node's cache, marks every
+// (tenant, partition) timeline used since the previous call so that its next
+// enqueue re-reads its position from the database, and evicts timelines left
+// unused for two consecutive calls (so an idle timeline is dropped within two
+// intervals).
+//
+// After a successful call, each timeline re-seeds before its next stamp,
+// which picks up stamps written by other producers and reclaims virtual time
+// from canceled jobs at the end of a tenant's backlog. New tenants, and
+// tenants whose timelines were evicted, are placed at the partition's
+// frontier even without Reconcile, because a timeline's first enqueue
+// refreshes that frontier itself. Drift in active timelines, however, is only
+// corrected by Reconcile.
+//
+// If ctx is done or a frontier refresh fails, Reconcile returns the error and
+// skips marking and eviction; frontiers refreshed before the error are kept.
+// Retrying on the next tick is sufficient. Reconcile is safe to call
+// concurrently with itself and with all other Queue methods.
+func (q *Queue) Reconcile(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("mongoqueue: reconcile: %w", err)
 	}

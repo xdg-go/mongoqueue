@@ -222,7 +222,19 @@ reconciliation. It is the last computed frontier, not a running maximum: the
 frontier can move backward when a delayed job turns visible or an expired
 lease re-enters the visible set, and the floor follows it, because the floor's
 job is to place a tenant at the actual point of service. A computation that
-finds no visible job leaves the previous value in place.
+finds no visible job leaves the previous value in place. When every pending
+job in the partition is leased or delayed, that keeps the floor at the old
+frontier, so a new tenant is placed above those jobs rather than ahead of
+them; this is intended.
+
+Refreshes are not sequenced against each other. A refresh that finishes late
+may overwrite a newer frontier with an older, lower one. The dip is bounded by
+how far the frontier moved while that refresh was in flight, and the next
+refresh corrects it; this is accepted rather than fenced. A partition's LWM is
+dropped once the node has no cached timeline in that partition: any
+reconciliation walk that finds none prunes it, so a stale value does not
+outlive the partition's presence in the cache. The next timeline created there
+is a cold one and refreshes the LWM first.
 
 A timeline whose cache entry is current is not re-seeded, so the floor
 reaches it only at its next re-seed. A tenant that drains and returns within
@@ -270,7 +282,10 @@ account for all forms of vtime 'refund' are not justified.
 The cache removes per-enqueue reads of durable state and per-dispatch
 coordination. Its cost is bounded staleness: an enqueuing node's view lags
 truth by up to one reconciliation interval, and fairness error is bounded
-accordingly. Because the cache is rebuildable, node restart and partition
+accordingly. Reconciliation is caller-driven, so that interval is whatever
+the caller chooses; a caller that never reconciles gets no bound on drift for
+active timelines (new and returning tenants are still floored, because a cold
+timeline refreshes its partition's LWM itself). Because the cache is rebuildable, node restart and partition
 handoff are self-healing -- a cold node reconstructs from durable stamps before
 it stamps again.
 

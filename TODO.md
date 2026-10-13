@@ -135,7 +135,13 @@ Rejected, recorded in the design doc's "Rejected alternatives":
   query, and memoryless says the floor tracks the actual service point,
   dips included. The LWM for a partition is simply its last computed
   frontier; a computation that finds no visible job leaves the prior
-  value (initially 0).
+  value (initially 0). A refresh that finishes late may overwrite a
+  newer one with an older, lower value; accepted as a bounded dip and
+  documented, not sequenced (decided 2026-10-13). When every pending job
+  is leased or delayed, keeping the prior value floors a new tenant above
+  them at the old frontier; that is intended. A partition's stored LWM
+  is dropped when the walk evicts its last cached timeline, so a stale
+  value never outlives the partition's cache presence.
 
 ### D2: reconciliation is lazy invalidation, not eager rewrite
 
@@ -159,8 +165,10 @@ after each reconcile, paid on the enqueue path.
 Consequences an implementer must preserve:
 - A seed failure fails that enqueue (existing behavior,
   `TestVtimeCacheSeedErrorRetries`). A reconcile that fails to refresh any
-  LWM returns its error and **leaves the cache untouched** -- no
-  invalidation, no eviction.
+  LWM returns its error and does **no invalidation and no eviction**.
+  Partitions refreshed before the failure keep their new LWM (decided
+  2026-10-13: harmless, the LWM is only a floor; no all-or-nothing
+  commit).
 - Re-seeding sets vtime to `max(trailing edge, lwm[partition])` where
   trailing edge is 0 when the timeline has no pending jobs. This one rule
   covers restart, trailing-cancellation refund (the edge drops),
@@ -578,33 +586,54 @@ seed is still `max pending or 0`.
 
 ## 6.4 Public Surface and Docs
 
-- [ ] Rename `reconcile` to exported `Reconcile(ctx) error`; update tests.
+- [x] Prune stored LWMs (6.0 D1, decided 2026-10-13): after each walk,
+  `invalidateAndEvict` deletes every `lwm` key whose partition has no
+  cached timeline left (self-healing if a late refresh re-stores a
+  pruned key) (take `lwmMu` after the global
+  lock per the lock order; no I/O). Update the `lwm` and `refreshLWM`
+  doc comments: stored values are pruned with the partition's last
+  entry, and a late refresh may overwrite a newer value with an older
+  one (accepted bounded dip). Fix `reconcile`'s comment: an error skips
+  invalidation and eviction; frontiers refreshed before it are kept
+- [x] **Test** (unit): LWM pruned with the partition -- `lwmHook`
+  returns `(10e6, true)` for `p1` and `p2`; reserve+commit `(a, p1)` and
+  `(a, p2)`; `refreshLWM` both. Walk (both touched, so both go stale);
+  reserve+commit `(a, p1)` only; walk again: `(a, p2)` is evicted,
+  `(a, p1)` is not, `lwmFor("p2")` reads 0 and `lwmFor("p1")` still reads
+  `10e6`. Then, with the hook now returning `(0, false)` and no seed hook
+  (edge 0), a cold reserve for `(b, p2)` gets vstamp `1e6` (cost 1,
+  weight 1), not `11e6`
+- [x] Rename `reconcile` to exported `Reconcile(ctx) error`; update tests.
   Godoc: what it does (refresh each cached partition's frontier,
   invalidate touched entries, evict idle ones), that callers run it on a
   ticker, that after a successful call each timeline re-seeds before its
   next stamp, that an idle entry is evicted after two consecutive
-  untouched passes (so up to two intervals), that an error leaves the
-  cache as it was, that new and evicted tenants are floored correctly
+  untouched passes (so up to two intervals), that an error skips
+  invalidation and eviction (frontiers refreshed before it are kept), that new and evicted tenants are floored correctly
   even without it (cold-seed refresh) but active timelines' drift is only
   corrected by it, and that concurrent calls are safe
-- [ ] `ExampleQueue_Reconcile` in `example_test.go`: ticker loop in a
+- [x] `ExampleQueue_Reconcile` in `example_test.go`: ticker loop in a
   goroutine with ctx cancellation. No `// Output:` comment, so it compiles
   but does not run (it needs a server)
-- [ ] Package godoc (`doc.go`): one paragraph naming `Reconcile` as a
+- [x] Package godoc (`doc.go`): one paragraph naming `Reconcile` as a
   caller obligation alongside `EnsureIndexes`; one sentence that fairness
   is per partition and memoryless
-- [ ] **Test**: concurrent `Reconcile` -- 4 goroutines call `Reconcile`
+- [x] **Test**: concurrent `Reconcile` -- 4 goroutines call `Reconcile`
   in a loop while 2 goroutines enqueue for one tenant in one partition;
   under `-race`, assert no error and the tenant's stamps are exactly
   `{1..N}×1e6`. The example compiles under `go vet`; other behavior is
   covered by 6.1-6.3
-- [ ] **Doc**: mongodb doc -- close open questions #2 and #3 (move the
+- [x] **Doc**: mongodb doc -- close open questions #2 and #3 (move the
   answers into the body, leave a one-line pointer); design doc "Why a
   cache, and what it costs" -- staleness bound is the caller's reconcile
   interval; implementation plan Phase 6 -- note the subphase reshaping
   (per-partition timelines added; lazy invalidation replaced eager
   rebuild; "rebuild on startup" is the lazy seed plus cold-seed frontier
-  refresh)
+  refresh); design doc "Low-water mark and the idle floor" -- add the
+  2026-10-13 D1 decisions: a late refresh may store an older, lower
+  frontier (bounded dip, accepted), a frontier query that finds only
+  leased or delayed jobs keeps the prior LWM so new tenants sit above
+  them, and a partition's LWM is dropped with its last cached timeline
 
 ---
 

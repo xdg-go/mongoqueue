@@ -232,6 +232,20 @@ operational assumption (NTP-class skew, benign against lease granularity),
 not something server-side stamping could eliminate -- `$$NOW` is not
 guaranteed consistent across a sharded cluster either.
 
+**Vtime cache and `Reconcile`.** Reconciliation is caller-driven: one
+exported method, `func (q *Queue) Reconcile(ctx context.Context) error`, that
+the caller runs on its own ticker. There is no internal goroutine, no `Close`,
+and no interval option, so `New` stays free of I/O and goroutines. `Reconcile`
+refreshes the dispatch frontier of every partition in the cache, then walks
+the cache: an entry used since the previous call is marked stale and re-seeds
+on its next enqueue; an entry unused since then is evicted. If any frontier
+refresh fails, it returns the error and neither invalidates nor evicts. A
+cold seed (the first enqueue on a (tenant, partition) this node has no entry
+for) refreshes that partition's frontier itself, so new and returning tenants
+are floored correctly even on a node that never calls `Reconcile`. Without
+`Reconcile`, cache drift for active timelines is never corrected and the cache
+never shrinks.
+
 `kind` is a payload field, so it rides on the `Kind[T]` binding rather than in
 `EnqueueOpts`. The binding is its only writer and pairs a stable `kind` with
 one body type `T` at a single declaration site; the queue stores the string
@@ -529,8 +543,8 @@ Interpretation: the frontier reuses the claim index and plan and adds no
 index, so it adds no write amplification. Its cost tracks the claim's:
 linear in the leased/delayed prefix in index keys, never in documents. An
 all-invisible partition walks its whole pending index range and fetches
-nothing. It is to run once per cold seed and once per cached partition per
-reconcile pass (6.3.2).
+nothing. It runs once per cold seed and once per cached partition per
+`Reconcile` call.
 
 **Benchmark (2026-10-10, MongoDB 8.2.11).** `make bench`
 (`BenchmarkClaimComplete`, 2,000 jobs per sub-benchmark), median of three
@@ -622,21 +636,7 @@ a rebuild.
 
 1. **Dispatch helper.** Whether to ship a caller-side `Kind` → handler `Mux`
    (asynq-style) as an optional layer above the primitive. Undecided.
-2. **Reconciliation/LWM index.** Decided in Phase 6 (see `TODO.md` 6.0 D1,
-   D2): no new index. The seed index, extended to `{tenant: 1, partition: 1,
-   liveness: 1, vstamp: -1}`, serves the per-timeline trailing edge that both
-   the cold-start seed and reconciliation's re-seed read; the low-water mark
-   is a partition's dispatch frontier, read with the claim filter on the claim
-   index. As built through 6.3, reconciliation adds no index: its re-seed is
-   the existing seed query, served by the seed index, and the frontier is the
-   claim filter on the claim index, sharing the claim's plan (see "Frontier
-   explain check" in "Indexes, contention, and GC"). The as-built summary
-   lands there when Phase 6 completes; this entry then becomes a pointer.
-3. **Reconciliation and cache surface.** Decided in Phase 6 (see `TODO.md` 6.0
-   D3): caller-driven. One exported `Reconcile(ctx) error` the caller runs on
-   its own ticker; no internal goroutine, so `New` stays free of I/O and
-   goroutines. A cold seed (first enqueue on a (tenant, partition) this node
-   has not seen) refreshes that partition's frontier itself, so new and
-   returning tenants are floored correctly without `Reconcile`; `Reconcile`
-   bounds drift for active timelines and evicts idle entries. As-built godoc
-   and example land with Phase 6.4.
+2. **Reconciliation/LWM index.** Closed: no new index; see "Indexes,
+   contention, and GC".
+3. **Reconciliation and cache surface.** Closed: caller-driven `Reconcile`;
+   see "Vtime cache and `Reconcile`" in "The Enqueue API".
