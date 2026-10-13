@@ -60,6 +60,20 @@ jobs receive near-term stamps and jump ahead, gaining low latency without
 claiming throughput share. Sorting by vstamp serves jobs in the order an
 idealized fair server would finish them.
 
+**Fairness is memoryless.** Capacity in a partition divides among the tenants
+that have pending work there, by their present weights. Past idleness earns a
+tenant no credit and costs it no penalty. Within a tenant, dispatch is FIFO.
+Across tenants, already-enqueued work is slowed by another tenant's arrival,
+never jumped: a tenant that becomes backlogged is placed one stride past the
+job the partition will serve next, exactly where it would be had it been
+active all along and just finished its previous work. This is the placement
+rule of start-time fair queueing (`start = max(own finish, system virtual
+time)`); the low-water mark below is the system virtual time. The floor sets
+where a returning tenant *starts*; its stride sets its *share* from then on,
+so a returning tenant that floods interleaves with incumbents at its weighted
+share from its first job rather than catching up on unused credit or waiting
+behind their backlogs.
+
 Cost may be known at enqueue or estimated; the cost section below covers
 estimation.
 
@@ -85,11 +99,13 @@ second at weight 1, a 64-bit virtual clock wraps after roughly 292,000 years.
 Floating-point is rejected for the stamp: it puts rounding and comparability
 hazards inside a sorted index key for no expressive gain.
 
-For a given tenant, we define the trailing edge as follows:
+Virtual time is kept per **timeline**, and a timeline is one tenant in one
+partition (see the next section). For a given timeline:
 
-* **Trailing edge** = its highest pending vstamp = its current vtime, the most recently enqueued job (last to be served).
+* **Trailing edge** = its highest pending vstamp = its current vtime, the most
+  recently enqueued job (last to be served).
 
-A tenant without pending jobs has an undefined trailing edge.
+A timeline without pending jobs has an undefined trailing edge.
 
 ## Two orthogonal axes: tenancy and partitioning
 
@@ -97,7 +113,8 @@ The queue exposes two independent capabilities. They compose, and a deployment
 selects each separately.
 
 **Tenancy — whether fairness is on.** A *multi-tenant* queue carries a tenant id
-and a cost on every job, stamps vstamps on per-tenant timelines, and dispatches
+and a cost on every job, stamps vstamps on per-tenant timelines (one per
+partition, below), and dispatches
 by minimum vstamp to divide capacity by weight. A *single-tenant* queue is the
 degenerate case of exactly one tenant: vtime advances uniformly, the vstamp
 reduces to an enqueue sequence, and dispatch is FIFO over the visible set.
@@ -109,6 +126,16 @@ multi-tenant with one tenant, the same code path.
 single default partition. A *partitioned* queue routes jobs to named partitions
 and scopes each claim to one. Partitioning narrows a claim's candidate set; it
 does not change the ordering rule within a partition.
+
+**Timelines are per tenant per partition.** Because every claim is scoped to
+one partition, each partition is its own dispatch queue with its own point of
+service. Virtual time follows that boundary: a tenant's vtime in one partition
+is independent of its vtime in another, so each partition is a complete fair
+queue over the tenants present in it, and a tenant's load in one partition
+does not move its position in another. The axes stay independent -- a
+single-tenant queue has one timeline per partition and an unpartitioned queue
+has one timeline per tenant -- and the fairness invariants below are stated
+per partition for this reason.
 
 The axes are independent and serve different cases:
 
@@ -135,8 +162,8 @@ idle tenants for free.
 
 ## Node-local cache model
 
-Per-tenant vtime lives as in-memory soft state on the node that stamps the
-tenant's jobs — the enqueuing node in single-stage operation, or the
+Each timeline's vtime lives as in-memory soft state on the node that stamps
+the tenant's jobs — the enqueuing node in single-stage operation, or the
 partition's owning stamper under two-stage partitioning (below). Stamping
 advances the local vtime and writes the vstamp onto the job. Stage-one
 ingestion nodes hold no vtime; they only append raw requests. The durable job
@@ -146,42 +173,75 @@ rebuildable accelerator, never the source of truth.
 ### Reconciliation
 
 A node periodically rebuilds its cache from durable state, bounding any drift
-between cache and truth. Reconciliation rebuilds each tenant's vtime — the
-cache's soft state — from its pending jobs (pending includes leased, in-flight
-jobs, which are still owed service). Two reconstructions of that vtime trade
-cost against robustness:
+between cache and truth. Reconciliation rebuilds each timeline's vtime — the
+cache's soft state — from that tenant's pending jobs in that partition
+(pending includes leased, in-flight jobs, which are still owed service). Two
+reconstructions of that vtime trade cost against robustness:
 
 - **Trailing edge** (the tenant's highest pending vstamp): cheap, and
   self-corrects trailing job cancellation, since a cancelled top job drops the
   max. Trusts the stored stamps, so correct only under
-  single-writer-per-tenant.
+  single-writer-per-timeline.
 - **Backlog** (LWM plus the sum of the tenant's pending strides): re-derives
   vtime from queued work rather than stored stamps, bounding multi-writer
   compression to one interval and flooring a drained tenant automatically.
   Costs a per-tenant aggregation.
 
 This model chooses to use **trailing edge**, with the expectation that
-single-writer-per-tenant is satisfied or that the deviations described later
+single-writer-per-timeline is satisfied or that the deviations described later
 are acceptable.
 
-A drained tenant has no pending jobs and therefore no reconstructed vtime; on
-its next enqueue the system treats it as returning and uses the low-water mark
-to seed its vtime. (See below.)
+Reconciliation need not rewrite the cache eagerly. Marking each entry stale so
+that its next enqueue re-runs the seed, under the same per-timeline exclusion
+that protects stamping, achieves the same drift bound without a second writer
+to the cache and without the fence an eager rewrite would need to avoid
+lowering vtime below a concurrently inserted job. The re-seed sets vtime to
+the greater of the trailing edge and the low-water mark (below); a timeline
+with no pending jobs has no trailing edge and takes the low-water mark alone,
+which is how a drained or returning tenant is placed. Entries left untouched
+across consecutive reconciliations are evicted, bounding cache memory; an
+evicted tenant is re-seeded the same way on its next enqueue.
 
 ### Low-water mark and the idle floor
 
-The **low-water mark** (LWM) is the **minimum active trailing edge** — the
-lowest trailing edge among tenants with pending work, i.e. the least advanced
-active tenant. The minimum ranges over the tenant set, not over nodes: the LWM
-is computed periodically and cached locally on the stamping node, soft state
-like vtime itself, not a value held consistent across the fleet. On enqueue the
-system floors a tenant's vtime to
-the LWM: vtime becomes the greater of its cached value and the LWM. This stops
-a returning idle tenant, whose stale vtime sits far below other tenants, from
-dominating resources to "catch up" on credit it never used.
+The **low-water mark** (LWM) of a partition is its **dispatch frontier**: the
+minimum vstamp among the partition's visible pending jobs, i.e. the vstamp the
+next claim in that partition would take. It is the system virtual time of
+start-time fair queueing, and it is per partition because each partition has
+its own point of service. Only *visible* jobs count: a leased or delayed job
+with a low vstamp is not about to be served, and letting it hold the frontier
+low would hand every newcomer stale credit.
 
-The floor raises a lagging tenant only. It does not pull down a tenant whose
-vtime sits too high — that case is cancellation.
+The LWM is soft state like vtime itself, computed on the stamping node and not
+held consistent across the fleet. A node refreshes a partition's LWM when it
+first creates a timeline in that partition (so a new or returning tenant is
+floored correctly even on a node that never reconciles) and on every
+reconciliation. It is the last computed frontier, not a running maximum: the
+frontier can move backward when a delayed job turns visible or an expired
+lease re-enters the visible set, and the floor follows it, because the floor's
+job is to place a tenant at the actual point of service. A computation that
+finds no visible job leaves the previous value in place.
+
+When a timeline is seeded or re-seeded, its vtime becomes the greater of its
+trailing edge and the partition's LWM. A tenant whose stale vtime sits far
+below the frontier is lifted to it and takes its weighted share from there;
+it cannot "catch up" on credit it never used. A tenant whose trailing edge
+sits above the frontier keeps its edge; it is not pushed behind anyone.
+
+The floor raises a lagging timeline only. It does not pull down a timeline
+whose vtime sits too high — that case is cancellation.
+
+Worked example, one partition, equal weights. Tenant b has jobs stamped 1..20
+and the first ten have been served, so the frontier is 11. Tenant a drained
+long ago with a cached vtime of 3 and now enqueues again. With no floor its
+job is stamped 4 and dispatches before b's ten remaining jobs (stale credit).
+Floored to the frontier it is stamped 12 and interleaves with b from the next
+claim. If a enqueues twenty jobs they are stamped 12..31 and alternate with
+b's 11..20 one for one: b finishes at the nineteenth claim instead of the
+tenth, a at the thirtieth, each having had half the capacity while both were
+backlogged. A floor at b's trailing edge (20) would instead have stamped a's
+first job 21, behind b's entire remaining backlog, which is tenant-level FIFO
+rather than fair sharing.
 
 ### Cancellation and vtime
 
@@ -205,10 +265,14 @@ it stamps again.
 
 ## The conserved single-writer requirement
 
-Virtual-time fairness requires that a single writer advance each tenant's
+Virtual-time fairness requires that a single writer advance each timeline's
 vtime. With several writers advancing independent copies from a shared
 baseline, their stamps overlap the same virtual-time range instead of summing;
-the tenant's trailing edge then advances too slowly and the tenant is over-served.
+the timeline's trailing edge then advances too slowly and the tenant is
+over-served. Because timelines are per tenant per partition, the requirement is
+per tenant per partition: two nodes may stamp one tenant's jobs without
+conflict if they stamp into different partitions. The same scope applies to
+the weight-consistency obligation above.
 
 A caller satisfies this requirement at the enqueue boundary when either only
 one node enqueues, or when enqueuers consistently hash tenants so each tenant
@@ -319,7 +383,10 @@ various situations that might benefit. E.g.
   ownership: one consumer per partition, or compression returns.
 - **Size-class lanes** that keep long jobs from blocking short ones. These
   require **shared** consumers: many workers per lane, since the lane is a
-  blocking-avoidance filter, not a single-writer constraint.
+  blocking-avoidance filter, not a single-writer constraint. Because timelines
+  are per partition, a tenant's long jobs in a slow lane do not push its short
+  jobs behind other tenants' in a fast lane; each lane shares its own capacity
+  fairly among the tenants present in it.
 
 Partitioning is a feature that is orthogonal to job lifecycle and leasing.
 
@@ -351,13 +418,15 @@ future; the job stays pending. This factoring forces a distinction the bare
 fairness model elided — between jobs that exist, jobs that can be claimed, and
 jobs in flight:
 
-- **pending** — every non-terminal job. Reconstruction and the LWM read this
-  set. A leased, in-flight job belongs here: it is still owed service, and
+- **pending** — every non-terminal job. Trailing-edge reconstruction reads
+  this set. A leased, in-flight job belongs here: it is still owed service, and
   excluding it would let reconciliation re-floor the tenant as if drained,
   losing the tenant's place.
 - **visible** — pending jobs whose visibility time has passed. This is the
   claim set: the dispatch index orders by vstamp over visible jobs within the
-  claimed partition and claims the minimum.
+  claimed partition and claims the minimum. The low-water mark is the minimum
+  of this set within a partition; it reads visible jobs only, because a leased
+  or delayed job is not about to be served and must not hold the floor low.
 - **leased** — pending jobs whose visibility time lies in the future. In
   flight, excluded from claim, still counted as backlog.
 
@@ -524,12 +593,15 @@ stride advances vtime.
 largest job cost times the worker count. A caller could bound it further with
 size-class lanes, runtime caps, and per-tenant concurrency caps.
 
-**Sparse-tenant responsiveness.** The idle LWM floor gives a returning or low-rate
-tenant prompt service rather than burying it behind a heavy backlog — the
-property that keeps interactive work responsive amid batch floods.  A
-returning tenant is floored to the LWM — the lowest trailing edge among active
-tenants — so it queues with priority comparable to the least advanced active
-tenant, but does not otherwise jump the queue.
+**Sparse-tenant responsiveness.** The idle LWM floor gives a returning or
+low-rate tenant prompt service rather than burying it behind a heavy backlog —
+the property that keeps interactive work responsive amid batch floods. A
+returning tenant is floored to its partition's dispatch frontier, so its first
+job lands one stride past the job about to be served: it joins at the point of
+service, neither jumping work already being served nor waiting behind another
+tenant's backlog. This gives a sparse tenant latency (its one job is near the
+front) without giving it throughput it has not earned (its tenth job in a burst
+sits behind the incumbents' tenth).
 
 **Clock discipline.** Visibility comparisons mix timestamps written at
 enqueue with the clock consulted at claim, and no storage backend guarantees
@@ -582,9 +654,9 @@ routing.
 
 **Note — garbage collection (not a required behavior).** Neither the store nor
 the cache is self-pruning. Resolved job records (completed or cancelled,
-including attempt-exhausted) accumulate unless reclaimed, and the per-tenant
-cache map grows with every tenant ever seen, retaining entries for tenants
-long gone idle. Neither threatens correctness — the design tolerates both —
+including attempt-exhausted) accumulate unless reclaimed, and the timeline
+cache map grows with every (tenant, partition) ever seen, retaining entries
+for tenants long gone idle. Neither threatens correctness — the design tolerates both —
 but both grow unbounded without a sweep. (An expired lease is not a resolved
 record; it re-enters the visible set and still dispatches, so it is not GC's
 concern.) The terminal write records a resolution timestamp so reclamation
@@ -613,9 +685,16 @@ A model or test suite should establish:
 - **Single resolution:** exactly one terminal write succeeds per job. A stale
   lease holder — stolen from or cancelled out from under — cannot resolve the
   job, because the fence rejects its terminal write.
+- **Memoryless placement:** a tenant that becomes backlogged in a partition
+  is placed within one stride of that partition's frontier. It neither
+  dispatches ahead of the frontier on credit from past idleness nor waits
+  behind another tenant's backlog; from its first job it receives its
+  weighted share.
 - **Lease accounting:** an in-flight (leased) job counts toward its tenant's
   backlog; reclaim preserves the job's original vstamp; lease expiry,
-  stealing, heartbeats, and early release do not alter virtual time.
+  stealing, heartbeats, and early release do not alter any stamp or vtime.
+  Visibility changes do move the sampled low-water mark, since the frontier is
+  defined over visible jobs.
 - **Enqueue accounting:** a tenant's cached vtime advances only when the
   job's durable insert succeeds; a failed or duplicate insert advances
   nothing. (Compute the stamp speculatively, commit the cache advance on
@@ -680,3 +759,30 @@ bucket-collision unfairness without removing the hard parts.
 
 **Message-queue backends.** Systems that own their ordering cannot express
 claim-by-minimum-vstamp and so cannot carry the fairness model.
+
+**Trailing-edge low-water mark.** An earlier revision defined the LWM as the
+minimum trailing edge among tenants with pending work. That places a newcomer
+behind the entire remaining backlog of the shallowest active tenant — with one
+tenant 600 jobs deep, a newcomer's first job waits behind all 600 — which is
+tenant-level FIFO, not fair sharing, and contradicts the idealized-fair-server
+model above. The dispatch frontier is the quantity that model specifies.
+
+**Idle credit.** Letting a returning tenant keep its stale vtime (no floor), or
+flooring it some fixed allowance below the frontier (a CFS-style sleeper
+bonus), rewards idleness with a burst ahead of incumbents. Unbounded credit
+lets a tenant idle for a year monopolize the queue for as long as its credit
+lasts; a bounded allowance is a knob with little to buy, since the frontier
+already places a sparse tenant's job within one stride of the front. Rejected
+in favor of memoryless placement.
+
+**One tenant timeline across partitions.** An earlier revision kept one vtime
+per tenant regardless of partition. With several partitions there is no single
+point of service, and every floor built on a shared timeline leaks: a single
+global frontier gives newcomers stale credit bounded only by the spread between
+lane frontiers, and trailing-edge re-seeding forgets a tenant's consumption in
+a fast lane whenever it has a job pending in a slow one; per-partition floors
+on the shared timeline instead drag a tenant's vtime to the hottest lane it
+touches and bury its work in cooler lanes behind backlog it never consumed.
+No stated goal depended on the cross-lane coupling, and size-class lanes exist
+to remove it. Timelines are therefore per tenant per partition, and each
+partition is an independent fair queue.

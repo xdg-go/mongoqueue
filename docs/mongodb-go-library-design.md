@@ -367,6 +367,14 @@ not steal early or late. Promote
   write concern breaks fencing, and single-resolution across failover
   requires `w: majority` (a `w: 1` write can roll back). Caller's choice,
   documented on `New`.
+- **Read concern.** The vtime cache's seed and frontier reads must observe
+  the queue's own acknowledged inserts, or a re-seed can reissue a stamp this
+  node already wrote. The reads are routed to the primary, which is necessary
+  but not sufficient: `w: 1` writes with a `"majority"` collection read
+  concern can leave an acknowledged insert outside the majority snapshot the
+  seed reads. The default `"local"` read concern satisfies the requirement,
+  as does `w: "majority"` paired with `"majority"` reads. Documented on
+  `New`, not detected or overridden.
 - **Collation and zero values.** The collection's default collation must be
   simple (binary); a non-simple collation makes partition matching and the
   `_id` tie-break follow it (case-insensitive matches partition `"A"` to
@@ -455,6 +463,15 @@ errors pass through wrapped.
 sort; `visible_at` rides in the index so the visibility predicate filters
 in-index without fetching documents. The leased low-vstamp prefix is still
 scanned past on every claim, but as index entries only.
+
+**Seed index:** `{tenant: 1, partition: 1, liveness: 1, vstamp: -1}`. Serves
+the per-(tenant, partition) trailing-edge query -- the maximum pending vstamp
+on one timeline -- that seeds and re-seeds the vtime cache. The claim index
+cannot serve it (it leads with `partition` and sorts `vstamp` ascending over
+all tenants). The low-water mark needs no index of its own: a partition's
+dispatch frontier is the claim filter with a `vstamp` projection, served by
+the claim index exactly as a claim is. Both reads go through the
+primary-routed collection handle (see "Lease contracts" on read concern).
 
 **Explain check (2026-10-09, MongoDB 8.2.11).** One partition seeded with
 10,000 pending jobs at low vstamps with `visible_at` a year in the future,
@@ -556,7 +573,7 @@ a rebuild.
 
 - **Bounded-random-skip claim** if a measured contention ceiling is hit (see
   above).
-- **Batch enqueue.** The per-tenant vtime cache makes batching natural
+- **Batch enqueue.** The per-timeline vtime cache makes batching natural
   (one cache advance, one `InsertMany`); leave API room, not in v1.
 - **Multi-writer detection.** `stamped_by` is recorded now (cheap to add
   early, expensive to retrofit). The consumer — a per-tenant distinct-writer
@@ -566,17 +583,19 @@ a rebuild.
 
 1. **Dispatch helper.** Whether to ship a caller-side `Kind` → handler `Mux`
    (asynq-style) as an optional layer above the primitive. Undecided.
-2. **Reconciliation/LWM index.** The claim index is settled (above); the
-   access path for the reconciliation and LWM aggregations (per-tenant max
-   pending vstamp) and its write-amplification cost are not. Note this is no
-   longer purely future work: the Phase 3.1 cold-start seed already runs the
-   per-tenant max-pending-vstamp query (`{tenant, liveness}` filter, `vstamp`
-   descending), which the claim index cannot serve (it leads with
-   `partition`). Without a `{tenant: 1, liveness: 1, vstamp: -1}` index, first
-   touch of a tenant is a filtered collection scan under that tenant's cache
-   lock. `EnsureIndexes` exists already and must grow this seed index; whether
-   the same index also serves the Phase 6 reconciliation aggregations is the
-   part still open.
-3. **Reconciliation and cache surface.** How the node-local vtime cache, periodic
-   reconciliation, and LWM computation are exposed and scheduled — internal
-   goroutine, caller-driven tick, or both.
+2. **Reconciliation/LWM index.** Decided in Phase 6 (see `TODO.md` 6.0 D1,
+   D2): no new index. The seed index, extended to `{tenant: 1, partition: 1,
+   liveness: 1, vstamp: -1}`, serves the per-timeline trailing edge that both
+   the cold-start seed and reconciliation's re-seed read; the low-water mark
+   is a partition's dispatch frontier, read with the claim filter on the claim
+   index. Explain results and the as-built summary land in "Indexes,
+   contention, and GC" when Phase 6 completes; this entry then becomes a
+   pointer.
+3. **Reconciliation and cache surface.** Decided in Phase 6 (see `TODO.md` 6.0
+   D3): caller-driven. One exported `Reconcile(ctx) error` the caller runs on
+   its own ticker; no internal goroutine, so `New` stays free of I/O and
+   goroutines. A cold seed (first enqueue on a (tenant, partition) this node
+   has not seen) refreshes that partition's frontier itself, so new and
+   returning tenants are floored correctly without `Reconcile`; `Reconcile`
+   bounds drift for active timelines and evicts idle entries. As-built godoc
+   and example land with Phase 6.4.

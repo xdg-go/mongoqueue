@@ -9,15 +9,20 @@ the caller above the primitive.
 ## The model in brief
 
 - **Virtual-time fairness.** Each job gets a virtual timestamp (`vstamp`) on its
-  tenant's timeline; enqueue advances the tenant's `vtime` by `cost / weight`.
-  Workers claim the lowest visible `(vstamp, job id)`. Heavier weight and cheaper
-  jobs sort earlier; a tenant flooding work pushes its own later jobs back.
+  timeline -- one per (tenant, partition); enqueue advances that `vtime` by
+  `cost / weight`. Workers claim the lowest visible `(vstamp, job id)`. Heavier
+  weight and cheaper jobs sort earlier; a tenant flooding work pushes its own
+  later jobs back. Fairness is memoryless: a new or returning tenant is floored
+  to its partition's dispatch frontier (the vstamp the next claim would take),
+  so it joins at the point of service with no credit for idle time and no
+  penalty behind others' backlogs.
 - **Stamp at enqueue, claim at dispatch.** Fairness is computed on the
   lower-contention enqueue path; dispatch is a single atomic "claim the minimum"
   (`FindOneAndUpdate`).
-- **Node-local cache.** Per-tenant `vtime` is rebuildable soft state; durable
-  job records carry the authoritative stamps. Periodic reconciliation bounds
-  drift.
+- **Node-local cache.** Per-(tenant, partition) `vtime` is rebuildable soft
+  state; durable job records carry the authoritative stamps. Caller-driven
+  `Reconcile` bounds drift by marking entries stale (each re-seeds to
+  `max(trailing edge, frontier)` on its next enqueue) and evicts idle ones.
 - **Lease, not removal.** A claim attaches a fenced `claim_id` and pushes
   `visible_at` forward; the job stays pending. Expired leases re-enter the
   visible set, so reclaim is lazy (no sweeper). Terminal writes guard on the
@@ -25,7 +30,8 @@ the caller above the primitive.
 - **Two orthogonal axes.** *Tenancy* (fairness on/off; single-tenant is the
   one-tenant degenerate case, same code path) and *partitioning* (scoped claims;
   unpartitioned is one default partition). Two-stage stamp partitioning is the
-  fallback when single-writer-per-tenant cannot be guaranteed at enqueue.
+  fallback when a single writer per (tenant, partition) cannot be guaranteed
+  at enqueue.
 
 ## Mongo/Go specifics
 
