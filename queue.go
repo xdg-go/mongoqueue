@@ -23,7 +23,7 @@ import (
 type Queue struct {
 	coll   *mongo.Collection
 	nodeID string
-	vtimes *vtimeCache // node-local per-tenant vtime soft state (see vtimecache.go)
+	vtimes *vtimeCache // node-local per-(tenant, partition) vtime soft state (see vtimecache.go)
 	// primary is coll with primary read preference, for reads that must not
 	// see a stale secondary (Get, Cancel's diagnostic read).
 	primary *mongo.Collection
@@ -61,7 +61,12 @@ func WithNodeID(id string) Option {
 // it (a case-insensitive one matches partition "A" to "a"). The client must
 // not omit empty values (BSONOptions.OmitEmpty or equivalent): the envelope
 // relies on zero values such as attempts: 0 and vstamp: 0 being stored, and
-// omitting them breaks attempt counting and claim ordering.
+// omitting them breaks attempt counting and claim ordering. Seed reads (which
+// go to the primary) must observe the queue's own acknowledged inserts: use
+// the default "local" read concern, or pair "majority" reads with
+// w: "majority" writes. With w: 1 writes and "majority" reads, an
+// acknowledged insert can be missing from the snapshot the seed reads, and
+// the timeline re-issues that job's vstamp.
 func New(coll *mongo.Collection, opts ...Option) *Queue {
 	q := &Queue{
 		coll:   coll,
@@ -71,34 +76,39 @@ func New(coll *mongo.Collection, opts ...Option) *Queue {
 	if coll != nil {
 		q.primary = coll.Clone(options.Collection().SetReadPreference(readpref.Primary()))
 	}
-	q.vtimes.seedHook = func(ctx context.Context, tenant, _ string) (int64, error) {
-		return q.seedTenantVtime(ctx, tenant)
-	}
+	q.vtimes.seedHook = q.seedTenantVtime
 	for _, opt := range opts {
 		opt(q)
 	}
 	return q
 }
 
-// seedTenantVtime is the vtime cache's cold-start seed (see
-// vtimeCache.seedHook): on the first enqueue for a tenant this node has not
-// seen, it returns the maximum vstamp among the tenant's pending jobs, or 0
-// if the tenant has none. Resolved jobs are excluded -- their timeline slots
-// are already consumed and TTL-collected records must not pin the floor.
+// seedTenantVtime is the vtime cache's seed (see vtimeCache.seedHook): on
+// the first enqueue for a (tenant, partition) timeline this node has not
+// seeded, it returns the timeline's trailing edge -- the maximum vstamp among
+// the tenant's pending jobs in that partition, or 0 if there are none.
+// Resolved jobs are excluded -- their timeline slots are already consumed and
+// TTL-collected records must not pin the floor.
 //
-// This is the minimal seed: it prevents a restarted node from re-stamping a
-// tenant's timeline below jobs already waiting, but it does not track other
-// writers after the first touch. Full reconciliation (periodic re-query, low
-// water mark, idle floor) arrives in Phase 6 and supersedes it.
+// Today the seed runs once per timeline per node. Reconciliation (Phase
+// 6.2-6.3) will invalidate entries so each timeline's next enqueue re-runs
+// this query, floored by the partition's dispatch frontier (its low-water
+// mark, LWM); re-seeding will track other writers, cancellation refunds, and
+// restarts.
+//
+// The read goes to the primary so it cannot see a trailing edge older than a
+// stamp this node issued. Primary routing is not sufficient on its own: the
+// read concern must also observe the queue's acknowledged inserts (see New).
 //
 // Index dependency: this query is served by the seed index
-// {tenant: 1, liveness: 1, vstamp: -1} that EnsureIndexes creates. The claim
-// index leads with partition and cannot serve it; without the seed index,
-// first touch of a tenant is a filtered collection scan under that tenant's
-// cache lock.
-func (q *Queue) seedTenantVtime(ctx context.Context, tenant string) (int64, error) {
+// {tenant: 1, partition: 1, liveness: 1, vstamp: -1} that EnsureIndexes
+// creates. The claim index leads with partition and cannot serve the
+// per-tenant lookup; without the seed index, seeding a timeline is a filtered
+// collection scan under that timeline's cache lock.
+func (q *Queue) seedTenantVtime(ctx context.Context, tenant, partition string) (int64, error) {
 	filter := bson.D{
 		{Key: "tenant", Value: tenant},
+		{Key: "partition", Value: partition},
 		{Key: "liveness", Value: LivenessPending},
 	}
 	opts := options.FindOne().
@@ -108,12 +118,12 @@ func (q *Queue) seedTenantVtime(ctx context.Context, tenant string) (int64, erro
 	var doc struct {
 		VStamp int64 `bson:"vstamp"`
 	}
-	err := q.coll.FindOne(ctx, filter, opts).Decode(&doc)
+	err := q.primary.FindOne(ctx, filter, opts).Decode(&doc)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return 0, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("mongoqueue: seed vtime for tenant %q: %w", tenant, err)
+		return 0, fmt.Errorf("mongoqueue: seed vtime for tenant %q partition %q: %w", tenant, partition, err)
 	}
 	return doc.VStamp, nil
 }
@@ -148,8 +158,9 @@ func randomHex() string {
 // (vstamp, _id) sort; visible_at rides in the index so the visibility
 // predicate filters in-index without fetching documents.
 //
-// The seed index {tenant: 1, liveness: 1, vstamp: -1} serves the cold-start
-// seed query, which reads a tenant's maximum pending vstamp.
+// The seed index {tenant: 1, partition: 1, liveness: 1, vstamp: -1} serves
+// the seed query, which reads a (tenant, partition) timeline's maximum
+// pending vstamp.
 //
 // Indexes are created with the driver's auto-generated names, so re-calling
 // EnsureIndexes with identical key specifications is a server-side no-op and
@@ -167,6 +178,7 @@ func (q *Queue) EnsureIndexes(ctx context.Context) error {
 		}},
 		{Keys: bson.D{
 			{Key: "tenant", Value: 1},
+			{Key: "partition", Value: 1},
 			{Key: "liveness", Value: 1},
 			{Key: "vstamp", Value: -1},
 		}},

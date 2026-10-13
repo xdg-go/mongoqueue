@@ -1,9 +1,9 @@
 package mongoqueue
 
-// Virtual time (vstamps and per-tenant vtimes) is fixed-point: an int64
-// counting units of 1/scale, i.e. 1e-6 cost-units. Fixed-point integer math
-// keeps stamping deterministic and cheap, and gives sub-unit resolution so
-// that high weights still yield distinct strides.
+// Virtual time (vstamps and per-(tenant, partition) vtimes) is fixed-point:
+// an int64 counting units of 1/scale, i.e. 1e-6 cost-units. Fixed-point
+// integer math keeps stamping deterministic and cheap, and gives sub-unit
+// resolution so that high weights still yield distinct strides.
 //
 // Overflow is documented out of reach rather than guarded in code: at a
 // sustained 10^6 cost-units/sec at weight 1, an int64 vtime lasts roughly

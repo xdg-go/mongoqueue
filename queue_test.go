@@ -112,6 +112,7 @@ func TestEnsureIndexesCreatesClaimAndSeedIndexes(t *testing.T) {
 		},
 		"seed": {
 			{Key: "tenant", Value: int32(1)},
+			{Key: "partition", Value: int32(1)},
 			{Key: "liveness", Value: int32(1)},
 			{Key: "vstamp", Value: int32(-1)},
 		},
@@ -231,13 +232,14 @@ func TestNodeID(t *testing.T) {
 }
 
 // seedRecord names the fields the cold-start seed query reads; the full Job
-// schema is not needed because the seed filters on tenant and pending
-// liveness and projects vstamp alone.
+// schema is not needed because the seed filters on tenant, partition, and
+// pending liveness and projects vstamp alone.
 type seedRecord struct {
-	ID       string   `bson:"_id"`
-	Tenant   string   `bson:"tenant"`
-	Liveness Liveness `bson:"liveness"`
-	VStamp   int64    `bson:"vstamp"`
+	ID        string   `bson:"_id"`
+	Tenant    string   `bson:"tenant"`
+	Partition string   `bson:"partition"`
+	Liveness  Liveness `bson:"liveness"`
+	VStamp    int64    `bson:"vstamp"`
 }
 
 // seedDoc inserts a minimal job document for cold-start seed tests.
@@ -249,10 +251,9 @@ func seedDoc(ctx context.Context, t *testing.T, coll *mongo.Collection, doc seed
 }
 
 // TestColdStartSeed verifies the vtime cache's cold-start seed: the first
-// reserve for a tenant with pending records starts from the max pending
-// vstamp (resolved records excluded), and a tenant with no records starts at
-// the floor of 0. This is the minimal Phase 3.1 seed; full reconciliation is
-// Phase 6.
+// reserve for a (tenant, partition) timeline with pending records starts from
+// the max pending vstamp in that partition (resolved records and other
+// partitions excluded), and a tenant with no records starts at the floor of 0.
 func TestColdStartSeed(t *testing.T) {
 	t.Parallel()
 
@@ -267,10 +268,13 @@ func TestColdStartSeed(t *testing.T) {
 	)
 	// Two pending records for tenant "warm" plus a resolved record with a
 	// higher vstamp, which must NOT influence the seed: resolved slots are
-	// already consumed and may be TTL-collected at any time.
-	seedDoc(ctx, t, coll, seedRecord{ID: "j1", Tenant: "warm", Liveness: LivenessPending, VStamp: 5 * scale})
-	seedDoc(ctx, t, coll, seedRecord{ID: "j2", Tenant: "warm", Liveness: LivenessPending, VStamp: maxPending})
-	seedDoc(ctx, t, coll, seedRecord{ID: "j3", Tenant: "warm", Liveness: LivenessResolved, VStamp: 99 * scale})
+	// already consumed and may be TTL-collected at any time. A pending record
+	// for "warm" in another partition, also higher, must not influence it
+	// either: each partition is its own timeline.
+	seedDoc(ctx, t, coll, seedRecord{ID: "j1", Tenant: "warm", Partition: defaultPartition, Liveness: LivenessPending, VStamp: 5 * scale})
+	seedDoc(ctx, t, coll, seedRecord{ID: "j2", Tenant: "warm", Partition: defaultPartition, Liveness: LivenessPending, VStamp: maxPending})
+	seedDoc(ctx, t, coll, seedRecord{ID: "j3", Tenant: "warm", Partition: defaultPartition, Liveness: LivenessResolved, VStamp: 99 * scale})
+	seedDoc(ctx, t, coll, seedRecord{ID: "j4", Tenant: "warm", Partition: "other", Liveness: LivenessPending, VStamp: 50 * scale})
 
 	q := New(coll)
 

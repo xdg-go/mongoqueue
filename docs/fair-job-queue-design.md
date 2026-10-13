@@ -47,10 +47,10 @@ reclaimed, and resolved.
 ## Core model: virtual-time fair queueing
 
 Each job carries a virtual timestamp (**vstamp**) marking a position on its
-tenant's virtual timeline. Enqueuing a job advances the tenant's virtual time
-(**vtime**) by a **stride** equal to cost divided by weight, and the job takes
-the new vtime as its vstamp. Workers dispatch jobs in vstamp order, lowest
-first.
+timeline -- its tenant in its partition (below). Enqueuing a job advances that
+timeline's virtual time (**vtime**) by a **stride** equal to cost divided by
+weight, and the job takes the new vtime as its vstamp. Workers dispatch
+jobs in vstamp order, lowest first.
 
 Fairness emerges from the advance rate. A heavier weight advances vtime more
 slowly per unit work, yielding lower stamps and earlier service. A tenant

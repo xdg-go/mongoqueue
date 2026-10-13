@@ -374,21 +374,21 @@ reconcile, no LWM yet.
   signatures
 
 ### 6.1.2 Seed query and index (`queue.go`)
-- [ ] `seedTenantVtime(ctx, tenant, partition)`: filter adds `partition`;
+- [x] `seedTenantVtime(ctx, tenant, partition)`: filter adds `partition`;
   read via `q.primary`; doc comment rewritten (drop "Phase 6 supersedes
   it"; describe the re-seed cycle to come, and the read-concern caveat)
-- [ ] Seed index becomes `{tenant: 1, partition: 1, liveness: 1,
+- [x] Seed index becomes `{tenant: 1, partition: 1, liveness: 1,
   vstamp: -1}` in `EnsureIndexes` and its doc comment
-- [ ] Add the read-concern caller requirement to `New`'s godoc (6.0)
-- [ ] **Test**: `TestColdStartSeed` -- fixtures gain `Partition`; add a
+- [x] Add the read-concern caller requirement to `New`'s godoc (6.0)
+- [x] **Test**: `TestColdStartSeed` -- fixtures gain `Partition`; add a
   pending record for the same tenant in another partition at a higher
   vstamp and assert it does not raise the seed
-- [ ] **Test**: `TestEnsureIndexesCreatesClaimAndSeedIndexes` expected
+- [x] **Test**: `TestEnsureIndexesCreatesClaimAndSeedIndexes` expected
   keys updated; explain check that the seed query uses the new index
   (`IXSCAN`, no blocking `SORT`), recorded in the mongodb design doc
-- [ ] **Test**: `TestFairnessPartitionScoped` rewritten per 6.0 (6.1
+- [x] **Test**: `TestFairnessPartitionScoped` rewritten per 6.0 (6.1
   values); comment states the rule it now proves
-- [ ] **Doc**: mongodb design doc -- seed index keys and the
+- [x] **Doc**: mongodb design doc -- seed index keys and the
   per-(tenant, partition) seed; generic design doc -- confirm the 6.0 D1
   wording landed in "Core model", "Two orthogonal axes", "Node-local cache
   model", and "The conserved single-writer requirement" (the drafts were

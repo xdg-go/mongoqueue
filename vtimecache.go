@@ -32,7 +32,7 @@ type vtimeCache struct {
 	// first reserve computes a candidate, so exactly one enqueue per timeline
 	// pays the query. Nil means start at 0. A hook error fails the reserve and
 	// leaves the timeline unseeded, so the next reserve retries the seed.
-	// Superseded by full reconciliation in Phase 6.
+	// Reconciliation will invalidate entries so each timeline re-seeds.
 	seedHook func(ctx context.Context, tenant, partition string) (int64, error)
 }
 

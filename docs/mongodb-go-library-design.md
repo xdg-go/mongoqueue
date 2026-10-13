@@ -493,6 +493,17 @@ scan range, so keys examined grow linearly with the leased/delayed
 low-vstamp prefix; this is the expected cost of the design, paid in index
 entries rather than document fetches.
 
+**Seed explain check (2026-10-13, MongoDB 8.2.11).** 450 jobs: tenants
+`a`/`b`/`c` × partitions `p1`/`p2`/`p3` × 50, vstamps 0..49e6 per timeline,
+every fifth job resolved. Explain (`executionStats`) on the seed query:
+filter `{tenant: "b", partition: "p2", liveness: "pending"}`, sort
+`{vstamp: -1}`, projection `{vstamp: 1}`, limit 1. Winning plan: `LIMIT` ←
+`PROJECTION_SIMPLE` ← `FETCH` ← `IXSCAN` on
+`tenant_1_partition_1_liveness_1_vstamp_-1`, point bounds on `tenant`,
+`partition`, and `liveness`, `vstamp [MaxKey, MinKey]`. No `SORT` stage.
+`totalKeysExamined` 1, `totalDocsExamined` 1, `nReturned` 1: the trailing
+edge is the first index entry for the timeline.
+
 **Benchmark (2026-10-10, MongoDB 8.2.11).** `make bench`
 (`BenchmarkClaimComplete`, 2,000 jobs per sub-benchmark), median of three
 runs. WiredTiger, single-member replica set on localhost; the client sets no

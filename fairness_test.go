@@ -202,9 +202,10 @@ func TestFairnessSingleTenant(t *testing.T) {
 	assertOrder(t, drainOrder(ctx, t, q, ""), enqueued)
 }
 
-// TestFairnessPartitionScoped proves partitions scope claims without
-// splitting tenant timelines: a tenant's vtime advances across all its
-// partitions, and each partition drains its own jobs by (vstamp, _id).
+// TestFairnessPartitionScoped proves a tenant's timeline is per partition:
+// enqueues in one partition do not advance the tenant's vtime in another, so
+// a tenant's first job in a new partition seeds fresh, and each partition
+// drains its own jobs by (vstamp, _id).
 func TestFairnessPartitionScoped(t *testing.T) {
 	t.Parallel()
 
@@ -218,7 +219,8 @@ func TestFairnessPartitionScoped(t *testing.T) {
 		opts.JobID, opts.TenantID, opts.Partition = id, tenant, partition
 		enqueueJob(ctx, t, q, opts)
 	}
-	// Vstamps (x1e6): a-000..a-004 = 1..5; b-000 = 1, b-001 = 2.
+	// Vstamps (x1e6): a-000..a-003 = 1..4 in p1; a-004 = 1 in p2 (fresh
+	// timeline, not a's p1 vtime); b-000 = 1 in p2; b-001 = 1 in p1.
 	for i := range 4 {
 		enqueue(fmt.Sprintf("a-%03d", i), "a", "p1")
 	}
@@ -226,8 +228,8 @@ func TestFairnessPartitionScoped(t *testing.T) {
 	enqueue("b-000", "b", "p2")
 	enqueue("b-001", "b", "p1")
 
-	assertOrder(t, drainOrder(ctx, t, q, "p1"), []string{"a-000", "a-001", "b-001", "a-002", "a-003"})
-	assertOrder(t, drainOrder(ctx, t, q, "p2"), []string{"b-000", "a-004"})
+	assertOrder(t, drainOrder(ctx, t, q, "p1"), []string{"a-000", "b-001", "a-001", "a-002", "a-003"})
+	assertOrder(t, drainOrder(ctx, t, q, "p2"), []string{"a-004", "b-000"})
 }
 
 // TestRaceFairnessConcurrentTenants enqueues two tenants concurrently, one
