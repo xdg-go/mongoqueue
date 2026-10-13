@@ -1,4 +1,4 @@
-# Rejected Designs — MongoDB/Go Implementation
+# Rejected Designs -- MongoDB/Go Implementation
 
 This records design alternatives considered and rejected for the Go/MongoDB
 implementation, with the reasoning, so the decisions in
@@ -25,7 +25,7 @@ BSON-native. The alternatives below were rejected.
 
 ### A. Opaque body + enqueue options
 
-`[]byte` / `json.RawMessage` body plus enqueue options — asynq's model. Trivial
+`[]byte` / `json.RawMessage` body plus enqueue options -- asynq's model. Trivial
 uniform storage, heterogeneous kinds in one queue, smallest surface. Rejected as
 the *whole* answer because it forces unmarshal boilerplate and a runtime kind
 switch the compiler cannot check. The chosen design keeps this opacity in the
@@ -33,7 +33,7 @@ core but adds a typed facade on top.
 
 ### B. Generic `Queue[T]` / `Job[T]`
 
-A trap. One `T` per queue collides with multi-tenancy — many kinds share one
+A trap. One `T` per queue collides with multi-tenancy -- many kinds share one
 fairness timeline. `Queue[any]` throws away the typing; one-queue-per-kind
 fractures fairness across separate timelines. This is also *not* how River
 actually works; River parameterizes the per-kind worker, not the queue.
@@ -44,11 +44,11 @@ actually works; River parameterizes the per-kind worker, not the queue.
 of complexity: it pushes envelope construction up into every caller type, is
 useless on the claim side (the library has no caller type to instantiate), and
 conflates a value with behavior. Reserve interfaces for the genuinely
-polymorphic seam — the storage backend.
+polymorphic seam -- the storage backend.
 
 #### C-embedding variant
 
-`type MyJob struct { mongoqueue.Job; ... }`. Legal Go — fields and methods
+`type MyJob struct { mongoqueue.Job; ... }`. Legal Go -- fields and methods
 promote, and the BSON driver inlines anonymous structs; it is the `gorm.Model`
 pattern. Rejected because it flattens envelope and body into one namespace:
 
@@ -88,10 +88,10 @@ design stores the body as a native BSON subdocument (`bson.Raw`), which is
 opaque to library code yet a real, queryable document in Mongo. The two rejected
 storage forms each fail one axis:
 
-- **JSON bytes** — opaque in code *and* opaque in the database: a useless escaped
+- **JSON bytes** -- opaque in code *and* opaque in the database: a useless escaped
   string blob that ops cannot query and the caller cannot index. It also adds a
   codec round trip (struct → JSON → BSON string and back).
-- **Embedding** — transparent in the database *and* transparent in code, with the
+- **Embedding** -- transparent in the database *and* transparent in code, with the
   collision and ownership-blur flaws of the C-embedding variant above.
 
 `bson.Raw` is opaque where opacity is wanted (library code) and transparent
@@ -101,8 +101,8 @@ where transparency is wanted (the database).
 
 A caller-supplied `WeightFunc(tenantID)` resolver (or a `RegisterTenant` API)
 was considered for supplying tenant weight and rejected in favor of a plain
-per-enqueue `Weight` field in `EnqueueOpts`. The resolver's benefit —
-weight-per-tenant by construction rather than by caller discipline — did not
+per-enqueue `Weight` field in `EnqueueOpts`. The resolver's benefit --
+weight-per-tenant by construction rather than by caller discipline -- did not
 justify its surface: a callback contract (call frequency, caching, error and
 missing-tenant semantics) and a policy opinion the library need not hold.
 Callers that want central weight management build their own registry above

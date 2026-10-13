@@ -1,4 +1,4 @@
-# Fair Multi-Tenant Job Queue — High-Level Design
+# Fair Multi-Tenant Job Queue -- High-Level Design
 
 ## Purpose and scope
 
@@ -55,7 +55,7 @@ first.
 Fairness emerges from the advance rate. A heavier weight advances vtime more
 slowly per unit work, yielding lower stamps and earlier service. A tenant
 submitting more work races its vtime ahead, pushing its later jobs behind its
-peers — automatic backpressure. A cheaper job advances vtime less, so small
+peers -- automatic backpressure. A cheaper job advances vtime less, so small
 jobs receive near-term stamps and jump ahead, gaining low latency without
 claiming throughput share. Sorting by vstamp serves jobs in the order an
 idealized fair server would finish them.
@@ -84,7 +84,7 @@ all enqueues for a tenant must carry a consistent weight over any interval
 where its share should be well-defined. Inconsistent weights blend the
 tenant's stride rate, distorting its share much as multi-writer stamping does;
 this obligation stands alongside the single-writer requirement. A weight
-change takes effect on subsequent stamps only — stamps are immutable, so a
+change takes effect on subsequent stamps only -- stamps are immutable, so a
 mid-backlog change leaves already-stamped jobs in place, a bounded transition
 effect (a raised weight underserves the tenant until its old stamps drain).
 
@@ -92,7 +92,7 @@ effect (a raised weight underserves the tenant until its old stamps drain).
 vtimes are 64-bit integers in units of 1/SCALE, with SCALE = 10^6. The stride
 is `max(1, cost * SCALE / weight)` in pure integer arithmetic (weight is a
 positive integer; zero means one). The floor guarantees every enqueue advances
-vtime — preserving the invariant that a tenant's vstamps strictly increase —
+vtime -- preserving the invariant that a tenant's vstamps strictly increase --
 and binds only when `cost < weight/SCALE`, where its fairness distortion is
 negligible. Overflow is out of reach: at a sustained 10^6 cost-units per
 second at weight 1, a 64-bit virtual clock wraps after roughly 292,000 years.
@@ -112,17 +112,17 @@ A timeline without pending jobs has an undefined trailing edge.
 The queue exposes two independent capabilities. They compose, and a deployment
 selects each separately.
 
-**Tenancy — whether fairness is on.** A *multi-tenant* queue carries a tenant id
+**Tenancy -- whether fairness is on.** A *multi-tenant* queue carries a tenant id
 and a cost on every job, stamps vstamps on per-tenant timelines (one per
 partition, below), and dispatches
 by minimum vstamp to divide capacity by weight. A *single-tenant* queue is the
 degenerate case of exactly one tenant: vtime advances uniformly, the vstamp
 reduces to an enqueue sequence, and dispatch is FIFO over the visible set.
-Fairness is then trivially satisfied — one tenant holds the whole share — so the
+Fairness is then trivially satisfied -- one tenant holds the whole share -- so the
 fairness machinery is a no-op, not a separate mode. Single-tenant is
 multi-tenant with one tenant, the same code path.
 
-**Partitioning — whether claims are scoped.** An *unpartitioned* queue is a
+**Partitioning -- whether claims are scoped.** An *unpartitioned* queue is a
 single default partition. A *partitioned* queue routes jobs to named partitions
 and scopes each claim to one. Partitioning narrows a claim's candidate set; it
 does not change the ordering rule within a partition.
@@ -139,15 +139,15 @@ per partition for this reason.
 
 The axes are independent and serve different cases:
 
-- *Multi-tenant, unpartitioned* — the canonical fair queue.
-- *Multi-tenant, partitioned* — a fair queue with size-class lanes; fairness
+- *Multi-tenant, unpartitioned* -- the canonical fair queue.
+- *Multi-tenant, partitioned* -- a fair queue with size-class lanes; fairness
   holds within each lane (see Correctness invariants).
-- *Single-tenant, partitioned* — a durable lease queue sharded or laned for
+- *Single-tenant, partitioned* -- a durable lease queue sharded or laned for
   throughput, with no fairness.
-- *Single-tenant, unpartitioned* — a plain durable lease queue.
+- *Single-tenant, unpartitioned* -- a plain durable lease queue.
 
 The two-stage stamping pipeline (below) is itself assembled from these: stage
-one is a *single-tenant, tenant-hash-partitioned* queue — fairness off — feeding
+one is a *single-tenant, tenant-hash-partitioned* queue -- fairness off -- feeding
 stampers that emit into a *multi-tenant* fair queue.
 
 ## Stamp at enqueue, not at dispatch
@@ -163,7 +163,7 @@ idle tenants for free.
 ## Node-local cache model
 
 Each timeline's vtime lives as in-memory soft state on the node that stamps
-the tenant's jobs — the enqueuing node in single-stage operation, or the
+the tenant's jobs -- the enqueuing node in single-stage operation, or the
 partition's owning stamper under two-stage partitioning (below). Stamping
 advances the local vtime and writes the vstamp onto the job. Stage-one
 ingestion nodes hold no vtime; they only append raw requests. The durable job
@@ -173,8 +173,8 @@ rebuildable accelerator, never the source of truth.
 ### Reconciliation
 
 A node periodically rebuilds its cache from durable state, bounding any drift
-between cache and truth. Reconciliation rebuilds each timeline's vtime — the
-cache's soft state — from that tenant's pending jobs in that partition
+between cache and truth. Reconciliation rebuilds each timeline's vtime -- the
+cache's soft state -- from that tenant's pending jobs in that partition
 (pending includes leased, in-flight jobs, which are still owed service). Two
 reconstructions of that vtime trade cost against robustness:
 
@@ -229,7 +229,7 @@ it cannot "catch up" on credit it never used. A tenant whose trailing edge
 sits above the frontier keeps its edge; it is not pushed behind anyone.
 
 The floor raises a lagging timeline only. It does not pull down a timeline
-whose vtime sits too high — that case is cancellation.
+whose vtime sits too high -- that case is cancellation.
 
 Worked example, one partition, equal weights. Tenant b has jobs stamped 1..20
 and the first ten have been served, so the frontier is 11. Tenant a drained
@@ -260,7 +260,7 @@ The cache removes per-enqueue reads of durable state and per-dispatch
 coordination. Its cost is bounded staleness: an enqueuing node's view lags
 truth by up to one reconciliation interval, and fairness error is bounded
 accordingly. Because the cache is rebuildable, node restart and partition
-handoff are self-healing — a cold node reconstructs from durable stamps before
+handoff are self-healing -- a cold node reconstructs from durable stamps before
 it stamps again.
 
 ## The conserved single-writer requirement
@@ -276,15 +276,15 @@ the weight-consistency obligation above.
 
 A caller satisfies this requirement at the enqueue boundary when either only
 one node enqueues, or when enqueuers consistently hash tenants so each tenant
-has one writer. When a caller cannot guarantee this — a generic library behind
-an uncontrolled load balancer — the system may alternatively satisfy it
+has one writer. When a caller cannot guarantee this -- a generic library behind
+an uncontrolled load balancer -- the system may alternatively satisfy it
 internally through two-stage stamp partitioning.
 
 ## Multi-writer failure analysis
 
 When several nodes independently stamp one tenant, the tenant's stamps
-**compress**: its trailing edge advances at roughly one over its fan-out — the
-number of distinct writers — so it is over-served by that factor. The
+**compress**: its trailing edge advances at roughly one over its fan-out -- the
+number of distinct writers -- so it is over-served by that factor. The
 consequence depends on whether fan-out is uniform across tenants.
 
 - **Uniform fan-out** (every tenant sprayed across all nodes): compression is
@@ -293,7 +293,7 @@ consequence depends on whether fan-out is uniform across tenants.
   low-volume tenants.
 - **Heterogeneous fan-out** (the balancer pins tenants to subsets, or fan-out
   scales with volume): compression differs per tenant, biasing service toward
-  high-fan-out — typically larger — tenants. This is a genuine, persistent
+  high-fan-out -- typically larger -- tenants. This is a genuine, persistent
   deviation from fairness, and reconstruction from trailing edge stamps does not
   repair it, because the stored stamps are already compressed.
 
@@ -308,8 +308,8 @@ deferred future work; the recorded writer id is the durable hook it will need.
 When the enqueue boundary cannot guarantee one writer per tenant, nor uniform
 fan-out, a caller may split ingestion from stamping. This is a workaround the
 caller builds, not behavior the library performs: the library supplies the
-primitives — a partition-routed durable queue, fenced exclusive ownership, and
-keyed idempotent insert — and the caller assembles them into a stamping tier.
+primitives -- a partition-routed durable queue, fenced exclusive ownership, and
+keyed idempotent insert -- and the caller assembles them into a stamping tier.
 The library does not operate the stampers, schedule them, or decide partition
 ownership.
 
@@ -321,10 +321,10 @@ caller-supplied job id, which the stamper later writes onto the stamped record
 unchanged. Stage one carries no fairness logic: it is a **single-tenant**
 queue whose only "tenant" is the ingestion stream itself. The caller-supplied
 tenant id rides along as a payload field and as the partition routing key,
-never as a fairness dimension — stage one neither stamps vstamps nor advances
+never as a fairness dimension -- stage one neither stamps vstamps nor advances
 any per-tenant vtime. Multiple writers per partition are acceptable. Stage-one
 requests carry no vstamp; the stamper consumes them in best-effort insertion
-order (any monotone storage key serves), which is irrelevant to fairness —
+order (any monotone storage key serves), which is irrelevant to fairness --
 fairness begins at stamping. The multi-tenant timeline begins only at stage
 two. The cost of stamping is
 assumed marginal, and fairness goals apply to the stamped work, not the
@@ -338,7 +338,7 @@ of how requests arrived.
 
 This relocates the single-writer requirement from a boundary the caller cannot
 control to a partition the caller controls via library primitives. The only
-condition the library imposes is a tenant id — irreducible for tenant fairness.
+condition the library imposes is a tenant id -- irreducible for tenant fairness.
 
 Three behaviors the caller's stamping stage must exhibit. The library makes
 each enforceable but does not implement them:
@@ -350,14 +350,14 @@ each enforceable but does not implement them:
   deficit-round-robin) across the tenants present in its partition. This
   interleaving needs no virtual time; it only prevents monopoly of the
   stamper's read cursor.
-- **Fence ownership handoff.** Partition reassignment — a stamper added,
-  removed, or recovered — is the only window where two stampers might own one
+- **Fence ownership handoff.** Partition reassignment -- a stamper added,
+  removed, or recovered -- is the only window where two stampers might own one
   partition and reintroduce compression. A fenced handoff (ownership
   revocation plus a monotonic token that rejects the stale owner) bounds this
   to rare, controlled transitions rather than a per-request hazard.
 - **Emit idempotently.** A stamper that emits a stamped job and then crashes
   before retiring the request will, on recovery, re-read the request and
-  re-emit — duplicating the job and advancing vtime twice, a single-writer
+  re-emit -- duplicating the job and advancing vtime twice, a single-writer
   violation against its own restart. Carrying the job id from request through to
   the stamped record makes the emit a keyed insert: the re-emit conflicts on the
   job id and is a no-op. This is why the job id originates at stage-one
@@ -369,13 +369,13 @@ single-writer-at-enqueue cannot be guaranteed, not the default.
 
 ## Partitioning as an orthogonal primitive
 
-Partition-and-claim — route records to partitions, let a worker claim only
-within a partition — is a mechanism distinct from virtual-time fairness, which
+Partition-and-claim -- route records to partitions, let a worker claim only
+within a partition -- is a mechanism distinct from virtual-time fairness, which
 is policy layered above. Every job carries a **partition** field and every
 claim names exactly one partition; an unpartitioned queue is simply a single
 default partition, so the claim path is identical whether or not a caller uses
 partitions. Within a partition the claim still takes the minimum `(vstamp, job
-id)` among visible records — partitioning narrows the claim's candidate set, it
+id)` among visible records -- partitioning narrows the claim's candidate set, it
 does not change the ordering rule. The system could use this primitive for
 various situations that might benefit. E.g.
 
@@ -396,12 +396,12 @@ A job's durable record carries a **liveness** status and, once terminal, a
 **resolution**. Liveness takes two values: **pending** (awaiting or undergoing
 service) and **resolved** (terminal). The system collapses every terminal
 outcome into the single resolved status and records the outcome separately as
-a resolution — supplied by the caller on complete, supplied by the queue on
+a resolution -- supplied by the caller on complete, supplied by the queue on
 cancel (the canceller invokes a queue verb rather than reporting an outcome).
 
 Resolution is scaffolding the queue establishes on behalf of the caller but
 does not interpret. Termination *requires* recording a resolution. Acting
-on a resolution — retrying, dead-lettering, continuing a workflow — belongs to
+on a resolution -- retrying, dead-lettering, continuing a workflow -- belongs to
 the caller above. The queue records *how* a job ended, never *what happens
 next*.
 
@@ -415,25 +415,25 @@ the winner's resolution.
 Dispatch does not move a job out of pending. A **claim** instead attaches a
 **claim id** to the pending record and pushes a **visibility time** into the
 future; the job stays pending. This factoring forces a distinction the bare
-fairness model elided — between jobs that exist, jobs that can be claimed, and
+fairness model elided -- between jobs that exist, jobs that can be claimed, and
 jobs in flight:
 
-- **pending** — every non-terminal job. Trailing-edge reconstruction reads
+- **pending** -- every non-terminal job. Trailing-edge reconstruction reads
   this set. A leased, in-flight job belongs here: it is still owed service, and
   excluding it would let reconciliation re-floor the tenant as if drained,
   losing the tenant's place.
-- **visible** — pending jobs whose visibility time has passed. This is the
+- **visible** -- pending jobs whose visibility time has passed. This is the
   claim set: the dispatch index orders by vstamp over visible jobs within the
   claimed partition and claims the minimum. The low-water mark is the minimum
   of this set within a partition; it reads visible jobs only, because a leased
   or delayed job is not about to be served and must not hold the floor low.
-- **leased** — pending jobs whose visibility time lies in the future. In
+- **leased** -- pending jobs whose visibility time lies in the future. In
   flight, excluded from claim, still counted as backlog.
 
 A fresh job is visible at once; a claimed job is invisible until its lease
 lapses; a lapsed lease makes the job visible again. *Visible* therefore
-unifies never-claimed and lease-expired under one predicate — pending and
-visibility-time elapsed — so the claim path needs no separate reclaim branch
+unifies never-claimed and lease-expired under one predicate -- pending and
+visibility-time elapsed -- so the claim path needs no separate reclaim branch
 and no knowledge of whether it is claiming fresh work or stealing.
 
 Reclaim preserves the job's original vstamp. Re-stamping would charge the
@@ -451,14 +451,14 @@ the worker its job was stolen or cancelled.
 
 The claim id is a **fence**, and its load-bearing role is to make the durable
 store reject a stale holder's *terminal* write, not merely its heartbeat. Were
-only the heartbeat fenced, a worker stolen from — paused past its visibility
-time, never heartbeating again — could still finish and record completion
+only the heartbeat fenced, a worker stolen from -- paused past its visibility
+time, never heartbeating again -- could still finish and record completion
 under its dead claim, double-resolving the job. Every lease-touching write
 therefore guards on the claim id and on pending liveness: extend, release,
 complete, and the cancellation a worker discovers. Heartbeat failure is the
 **detection** path that lets a preempted worker abort early and save wasted
 effort; the fence on the terminal write is the **safety** property. The two
-are independent, and only the second is required for correctness — heartbeats
+are independent, and only the second is required for correctness -- heartbeats
 are a latency optimization, not a safety mechanism.
 
 Claim ids must be unique per claim and never reused, so a stale holder's id
@@ -469,22 +469,22 @@ early release) matches nothing.
 
 ### Early release
 
-A worker that cannot finish a job — a transient failure, a dependency down —
+A worker that cannot finish a job -- a transient failure, a dependency down --
 may **release** its lease rather than completing terminally or abandoning the
 lease to expire. Release is a fenced write, guarded like a heartbeat on claim
 id and pending liveness, that sets the visibility time to now plus a
 caller-chosen delay (zero means immediately reclaimable) and **clears the
 claim id**. The delay is the caller's backoff lever; the queue supplies the
 primitive, never the retry policy. The next claim of a released job is an
-ordinary claim — the attempt count still increments, and the job keeps its
+ordinary claim -- the attempt count still increments, and the job keeps its
 original vstamp. Release is not a virtual-time event.
 
 Release must clear the claim id, unlike cancellation. It is the one transition
 that would otherwise leave a stale fence live: after a steal the new claim
 overwrites the claim id, and after a cancel the liveness guard rejects the old
 holder, but a released job is still pending and unclaimed, so an uncleared
-claim id would still match every guard. The releasing worker — or a goroutine
-it left behind — could complete the job it gave up, or heartbeat it and push
+claim id would still match every guard. The releasing worker -- or a goroutine
+it left behind -- could complete the job it gave up, or heartbeat it and push
 the visibility time back out, silently un-releasing it. Clearing makes fence
 revocation structural: the worker's authority ends when it declares it is
 done, not at the next claim.
@@ -498,25 +498,25 @@ claim id. The claim id is a per-claim fence that rotates on every claim; the job
 id names the job itself.
 
 The job id is the caller's handle for the operations the queue exposes but does
-not drive — **cancel** (an external caller naming the job to resolve) and
+not drive -- **cancel** (an external caller naming the job to resolve) and
 resolution lookup (polling how a job ended). Because the caller supplies it,
 enqueue is **idempotent**: submitting under an id already present is a no-op
 insert, not a duplicate, so a caller can safely retry an enqueue whose outcome
-it never observed. The stored record wins — a retried enqueue carrying a
-different body under the same id changes nothing — and the duplicate is
+it never observed. The stored record wins -- a retried enqueue carrying a
+different body under the same id changes nothing -- and the duplicate is
 signaled to the caller rather than silently absorbed, so an id-collision bug
 is visible instead of a quiet data loss. It is likewise the natural key for the effect-level
 deduplication job bodies must perform, since delivery is at-least-once, not
 exactly-once.
 
 The job id also completes the dispatch order. Within a tenant, vstamps strictly
-increase — each enqueue advances vtime by a positive stride — so a tenant's own
+increase -- each enqueue advances vtime by a positive stride -- so a tenant's own
 jobs never tie. Ties arise only across tenants, when two hold a job at the same
 vstamp; both are equally entitled at that virtual instant, so any rule ordering
 them is fair. The dispatch index is therefore ordered by `(vstamp, job id)`: the
 job id breaks ties deterministically, giving a definite minimum and a total
 order, while the tie itself is fairness-neutral. That the caller supplies the
-tiebreaking id is harmless — it arbitrates only between equally-entitled jobs of
+tiebreaking id is harmless -- it arbitrates only between equally-entitled jobs of
 *different* tenants, never the order of a tenant's own work.
 
 ### Reclaim by expiry, not by sweep
@@ -542,7 +542,7 @@ Two transitions reach the resolved status, differing only in authorization:
   guards on pending liveness alone. An in-flight worker is not stopped
   directly; it discovers the cancellation at its next heartbeat or terminal
   write, both of which fail the pending guard. Cancellation is therefore
-  cooperative — the worker aborts within one heartbeat interval, or its
+  cooperative -- the worker aborts within one heartbeat interval, or its
   terminal write is rejected and its output discarded. Because the canceller
   reports no outcome, the queue supplies cancel's resolution: a fixed
   queue-defined value marking the cancel path.
@@ -567,14 +567,14 @@ bound, a job that crashes its worker every time would retry forever and burn
 capacity. A worker should read the attempt count on claim and, past a
 worker-configured threshold, resolve the job terminally with an exhaustion
 resolution rather than running it again. The queue supplies the count; the
-retry count checking and what becomes of an exhausted job — a dead-letter
-lane, an alert, a manual replay — is the caller's responsibility.
+retry count checking and what becomes of an exhausted job -- a dead-letter
+lane, an alert, a manual replay -- is the caller's responsibility.
 
 ### Effects are at-least-once
 
 A lease bounds duplicate *dispatch* and *termination*; it cannot bound duplicate
 external *effects*. A worker paused past its visibility time may already have
-acted on the world — sent the email, changed a database — before its fenced
+acted on the world -- sent the email, changed a database -- before its fenced
 terminal write is rejected. The fence protects the queue record's consistency,
 not side effects. Job bodies must therefore be idempotent or carry their own
 effect-level deduplication: the queue guarantees at-least-once delivery, never
@@ -586,7 +586,7 @@ exactly-once execution.
 exact. When unknown, the caller provides an estimate. Estimation errors are
 uncorrected. Recording actual cost and updating vtimes or pending vstamps adds
 complexity and coordination costs inconsistent with the design goal. Cost must
-be strictly positive — the system floors it to a small minimum — so every
+be strictly positive -- the system floors it to a small minimum -- so every
 stride advances vtime.
 
 **Long, non-preemptible jobs.** Worst-case unfairness is bounded by the
@@ -594,7 +594,7 @@ largest job cost times the worker count. A caller could bound it further with
 size-class lanes, runtime caps, and per-tenant concurrency caps.
 
 **Sparse-tenant responsiveness.** The idle LWM floor gives a returning or
-low-rate tenant prompt service rather than burying it behind a heavy backlog —
+low-rate tenant prompt service rather than burying it behind a heavy backlog --
 the property that keeps interactive work responsive amid batch floods. A
 returning tenant is floored to its partition's dispatch frontier, so its first
 job lands one stride past the job about to be served: it joins at the point of
@@ -608,7 +608,7 @@ enqueue with the clock consulted at claim, and no storage backend guarantees
 one consistent clock (a sharded cluster's server-side "now" varies by shard).
 The design therefore assumes operationally bounded clock skew (NTP-class)
 rather than engineering around it: skew shifts a job's visibility by at most
-the skew bound — benign against lease granularity — and never affects fencing,
+the skew bound -- benign against lease granularity -- and never affects fencing,
 which compares identities, not clocks. This is a documented operational
 assumption, not a correctness dependency.
 
@@ -628,12 +628,12 @@ The storage backend must provide three behaviors:
 1. **Durable insert** of a single record, keyed by job id, rejecting a
 duplicate id. The duplicate-key rejection is the basis for idempotent enqueue
 and for idempotent stamper re-emit.
-2. **Atomic conditional transition** of a single record — claim, heartbeat,
+2. **Atomic conditional transition** of a single record -- claim, heartbeat,
 release, complete, cancel expressed as guarded state changes, where guards
 include claim-id fencing and pending-state checks.
-3. **Ordered claim of the minimum key** — `(vstamp, job id)` — among
-**visible** records **within a named partition** — pending records in that
-partition whose visibility time has elapsed — with mutual exclusion under
+3. **Ordered claim of the minimum key** -- `(vstamp, job id)` -- among
+**visible** records **within a named partition** -- pending records in that
+partition whose visibility time has elapsed -- with mutual exclusion under
 concurrent claimers. A claim names exactly one partition; an unpartitioned
 queue uses a single default partition, so the claim path is identical either
 way. A claim is itself an atomic transition of the selected record. The job id
@@ -652,11 +652,11 @@ therefore portable across indexed stores and inexpressible on append-only or
 fixed-order queue services, which can offer only native ordering or partition
 routing.
 
-**Note — garbage collection (not a required behavior).** Neither the store nor
+**Note -- garbage collection (not a required behavior).** Neither the store nor
 the cache is self-pruning. Resolved job records (completed or cancelled,
 including attempt-exhausted) accumulate unless reclaimed, and the timeline
 cache map grows with every (tenant, partition) ever seen, retaining entries
-for tenants long gone idle. Neither threatens correctness — the design tolerates both —
+for tenants long gone idle. Neither threatens correctness -- the design tolerates both --
 but both grow unbounded without a sweep. (An expired lease is not a resolved
 record; it re-enters the visible set and still dispatches, so it is not GC's
 concern.) The terminal write records a resolution timestamp so reclamation
@@ -683,7 +683,7 @@ A model or test suite should establish:
 - **No duplication:** no job dispatches twice within the duration of a lease;
   the lease plus conditional transition admits one claimer at a time.
 - **Single resolution:** exactly one terminal write succeeds per job. A stale
-  lease holder — stolen from or cancelled out from under — cannot resolve the
+  lease holder -- stolen from or cancelled out from under -- cannot resolve the
   job, because the fence rejects its terminal write.
 - **Memoryless placement:** a tenant that becomes backlogged in a partition
   is placed within one stride of that partition's frontier. It neither
@@ -728,7 +728,7 @@ refreshes reintroduces the coordination the design avoids.
 **Refund-on-cancel.** Decrementing a tenant's vtime by a cancelled job's
 stride at cancel time was considered and dropped. It wanted per-cancel
 bookkeeping and, for co-located exactness, a multi-record transaction the
-contract otherwise avoids. Cancellation is expected to be rare — a rare,
+contract otherwise avoids. Cancellation is expected to be rare -- a rare,
 bounded, self-correcting error not worth the machinery.
 
 **Sweeper-based lease reclaim.** A background sweeper that scans claimed jobs
@@ -739,8 +739,8 @@ per-job heartbeat writes and a tuned visibility timeout. The trade favors the
 design's goal of minimal cross-node coordination.
 
 **Distinct terminal states.** Modeling completed, cancelled, and failed (and
-timed-out, exhausted, and so on) as separate durable states — as workflow
-engines do — was considered and rejected for this primitive. Those engines
+timed-out, exhausted, and so on) as separate durable states -- as workflow
+engines do -- was considered and rejected for this primitive. Those engines
 branch on the terminal state: cancellation runs compensation, failure drives
 retry policy, and result APIs decide error propagation by terminal-state
 membership. This queue owns none of that. It dispatches fairly and leases
@@ -762,8 +762,8 @@ claim-by-minimum-vstamp and so cannot carry the fairness model.
 
 **Trailing-edge low-water mark.** An earlier revision defined the LWM as the
 minimum trailing edge among tenants with pending work. That places a newcomer
-behind the entire remaining backlog of the shallowest active tenant — with one
-tenant 600 jobs deep, a newcomer's first job waits behind all 600 — which is
+behind the entire remaining backlog of the shallowest active tenant -- with one
+tenant 600 jobs deep, a newcomer's first job waits behind all 600 -- which is
 tenant-level FIFO, not fair sharing, and contradicts the idealized-fair-server
 model above. The dispatch frontier is the quantity that model specifies.
 
