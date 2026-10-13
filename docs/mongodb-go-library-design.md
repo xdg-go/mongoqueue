@@ -504,6 +504,34 @@ filter `{tenant: "b", partition: "p2", liveness: "pending"}`, sort
 `totalKeysExamined` 1, `totalDocsExamined` 1, `nReturned` 1: the trailing
 edge is the first index entry for the timeline.
 
+**Frontier explain check (2026-10-13, MongoDB 8.2.11).** Explain
+(`executionStats`) on `computeLWM`: one `FindOne` on the primary with the
+claim filter (`partition`, `liveness: "pending"`,
+`$expr: {$lte: ["$visible_at", "$$NOW"]}`, shared with Claim via
+`claimFilter`), sort `{vstamp: 1, _id: 1}`, projection `{vstamp: 1}`, limit
+1. Fixture in the claim check's shape: partition `a` has 100 visible pending
+jobs; partition `b` has 10,000 leased pending jobs at vstamps 0..9999e6
+(`claim_id` set, `visible_at` a year ahead), then 100 visible at higher
+vstamps; partition `c` has 1,000 pending jobs, all leased. Winning plan in
+every case: `LIMIT 1` ← `PROJECTION_SIMPLE` ← `FETCH` (residual `$expr`
+filter) ← forward `IXSCAN` on
+`partition_1_liveness_1_vstamp_1__id_1_visible_at_1`, point bounds on
+`partition` and `liveness`, `vstamp`/`_id` `[MinKey, MaxKey]`,
+`visible_at [MinKey, <$$NOW>]`. No rejected plans, no `SORT` stage.
+
+| Partition                  | `totalKeysExamined` | `totalDocsExamined` | `nReturned` |
+|----------------------------|--------------------:|--------------------:|------------:|
+| `a` (all visible)          | 1                   | 1                   | 1           |
+| `b` (10,000 leased prefix) | 10,001              | 1                   | 1           |
+| `c` (all 1,000 leased)     | 1,000               | 0                   | 0           |
+
+Interpretation: the frontier reuses the claim index and plan and adds no
+index, so it adds no write amplification. Its cost tracks the claim's:
+linear in the leased/delayed prefix in index keys, never in documents. An
+all-invisible partition walks its whole pending index range and fetches
+nothing. It is to run once per cold seed and once per cached partition per
+reconcile pass (6.3.2).
+
 **Benchmark (2026-10-10, MongoDB 8.2.11).** `make bench`
 (`BenchmarkClaimComplete`, 2,000 jobs per sub-benchmark), median of three
 runs. WiredTiger, single-member replica set on localhost; the client sets no
@@ -599,11 +627,11 @@ a rebuild.
    liveness: 1, vstamp: -1}`, serves the per-timeline trailing edge that both
    the cold-start seed and reconciliation's re-seed read; the low-water mark
    is a partition's dispatch frontier, read with the claim filter on the claim
-   index. As built through 6.2, reconciliation adds no index: its re-seed is
-   the existing seed query, served by the seed index. The frontier access path
-   is pending 6.3. Explain results and the as-built summary land in "Indexes,
-   contention, and GC" when Phase 6 completes; this entry then becomes a
-   pointer.
+   index. As built through 6.3, reconciliation adds no index: its re-seed is
+   the existing seed query, served by the seed index, and the frontier is the
+   claim filter on the claim index, sharing the claim's plan (see "Frontier
+   explain check" in "Indexes, contention, and GC"). The as-built summary
+   lands there when Phase 6 completes; this entry then becomes a pointer.
 3. **Reconciliation and cache surface.** Decided in Phase 6 (see `TODO.md` 6.0
    D3): caller-driven. One exported `Reconcile(ctx) error` the caller runs on
    its own ticker; no internal goroutine, so `New` stays free of I/O and

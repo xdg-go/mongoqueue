@@ -128,6 +128,33 @@ func (q *Queue) seedTenantVtime(ctx context.Context, tenant, partition string) (
 	return doc.VStamp, nil
 }
 
+// computeLWM returns partition's dispatch frontier (its low-water mark): the
+// vstamp the next claim would take, found with the claim filter and sort.
+// ok is false when the partition has no visible pending job.
+//
+// Visibility filtering matters: a leased or delayed job is not dispatchable
+// now, so it must not pin the floor below the point of service.
+//
+// The read goes to the primary, like the seed query, and is served by the
+// claim index.
+func (q *Queue) computeLWM(ctx context.Context, partition string) (lwm int64, ok bool, err error) {
+	opts := options.FindOne().
+		SetSort(claimSort()).
+		SetProjection(bson.D{{Key: "vstamp", Value: 1}})
+
+	var doc struct {
+		VStamp int64 `bson:"vstamp"`
+	}
+	err = q.primary.FindOne(ctx, claimFilter(partition), opts).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("mongoqueue: compute frontier for partition %q: %w", partition, err)
+	}
+	return doc.VStamp, true, nil
+}
+
 // defaultNodeID builds hostname-pid-<random hex>. A hostname lookup failure
 // falls back to "unknown" so the id is always well formed; the random suffix
 // keeps two processes on the same host (or a host whose name is unknown)

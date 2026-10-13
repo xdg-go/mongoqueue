@@ -57,13 +57,9 @@ func (q *Queue) Claim(ctx context.Context, partition string, lease time.Duration
 	}
 	claimID := bson.NewObjectID().Hex()
 
-	filter := bson.D{
-		{Key: "partition", Value: partition},
-		{Key: "liveness", Value: LivenessPending},
-		{Key: "$expr", Value: bson.D{{Key: "$lte", Value: bson.A{"$visible_at", "$$NOW"}}}},
-	}
+	filter := claimFilter(partition)
 	opts := options.FindOneAndUpdate().
-		SetSort(bson.D{{Key: "vstamp", Value: 1}, {Key: "_id", Value: 1}}).
+		SetSort(claimSort()).
 		SetReturnDocument(options.After)
 	// A pipeline update so $$NOW supplies server time. The claim id is
 	// wrapped in $literal: in a pipeline a "$"-prefixed string is a field path.
@@ -82,4 +78,22 @@ func (q *Queue) Claim(ctx context.Context, partition string, lease time.Duration
 		return nil, fmt.Errorf("mongoqueue: claim in partition %q: %w", partition, err)
 	}
 	return &ClaimedJob{Job: job, q: q, jobID: job.ID, claimID: claimID}, nil
+}
+
+// claimFilter selects partition's visible set: pending jobs whose visible_at
+// has passed in server time ($$NOW). Claim and the frontier query
+// (computeLWM) share it and claimSort so the frontier is always the job the
+// next claim would take.
+func claimFilter(partition string) bson.D {
+	return bson.D{
+		{Key: "partition", Value: partition},
+		{Key: "liveness", Value: LivenessPending},
+		{Key: "$expr", Value: bson.D{{Key: "$lte", Value: bson.A{"$visible_at", "$$NOW"}}}},
+	}
+}
+
+// claimSort orders the visible set for dispatch: lowest (vstamp, _id) first.
+// Shared with computeLWM; see claimFilter.
+func claimSort() bson.D {
+	return bson.D{{Key: "vstamp", Value: 1}, {Key: "_id", Value: 1}}
 }

@@ -299,6 +299,49 @@ func TestColdStartSeed(t *testing.T) {
 	r2.Abort()
 }
 
+// TestComputeLWM proves the frontier is the minimum vstamp in the claim's
+// visible set: leased, delayed, and resolved jobs below it are skipped, and
+// other partitions are ignored.
+func TestComputeLWM(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	q := New(db.Collection("jobs"))
+
+	past := time.Now().Add(-time.Minute)
+	insertJob(ctx, t, q, Job{ID: "visible-7", Partition: "p1", Liveness: LivenessPending, VStamp: 7 * scale, VisibleAt: past})
+	insertJob(ctx, t, q, Job{ID: "visible-4", Partition: "p1", Liveness: LivenessPending, VStamp: 4 * scale, VisibleAt: past})
+	insertJob(ctx, t, q, Job{
+		ID: "leased", Partition: "p1", Liveness: LivenessPending, VStamp: 1 * scale,
+		ClaimID: "fence", VisibleAt: time.Now().Add(time.Minute),
+	})
+	insertJob(ctx, t, q, Job{ID: "delayed", Partition: "p1", Liveness: LivenessPending, VStamp: 2 * scale, VisibleAt: time.Now().Add(time.Hour)})
+	insertJob(ctx, t, q, Job{
+		ID: "resolved", Partition: "p1", Liveness: LivenessResolved, VStamp: 3 * scale,
+		Resolution: ResolutionCompleted, VisibleAt: past, ResolvedAt: past,
+	})
+	insertJob(ctx, t, q, Job{ID: "other", Partition: "p2", Liveness: LivenessPending, VStamp: 1 * scale, VisibleAt: past})
+
+	for _, tc := range []struct {
+		partition string
+		wantLWM   int64
+		wantOK    bool
+	}{
+		{"p1", 4 * scale, true},
+		{"p2", 1 * scale, true},
+		{"empty", 0, false},
+	} {
+		lwm, ok, err := q.computeLWM(ctx, tc.partition)
+		if err != nil {
+			t.Fatalf("computeLWM(%q): %v", tc.partition, err)
+		}
+		if lwm != tc.wantLWM || ok != tc.wantOK {
+			t.Errorf("computeLWM(%q) = (%d, %v), want (%d, %v)", tc.partition, lwm, ok, tc.wantLWM, tc.wantOK)
+		}
+	}
+}
+
 func keysEqual(a, b bson.D) bool {
 	if len(a) != len(b) {
 		return false

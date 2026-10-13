@@ -469,22 +469,22 @@ seed is still `max pending or 0`.
 ## 6.3 LWM: Per-Partition Frontier and Idle Floor
 
 ### 6.3.1 Frontier query (`queue.go`)
-- [ ] `(q *Queue) computeLWM(ctx, partition string) (int64, bool, error)`
+- [x] `(q *Queue) computeLWM(ctx, partition string) (int64, bool, error)`
   reading `q.primary`: one `FindOne` with the **claim filter**
   (`partition`, `liveness: pending`, `$expr: {$lte: ["$visible_at",
   "$$NOW"]}`), sort `{vstamp: 1, _id: 1}`, projection `{vstamp: 1}`;
   `ok = false` on `ErrNoDocuments`
-- [ ] Explain check, recorded in the mongodb design doc next to the claim
+- [x] Explain check, recorded in the mongodb design doc next to the claim
   explain check: expect the claim plan (`IXSCAN` on the claim index, no
   blocking `SORT`, one document fetched). Include keys examined with a
   leased prefix, as the claim check did, and for a partition whose pending
   jobs are all invisible (the scan walks the partition's whole pending
   range in the index and returns nothing).
-- [ ] **Stop rule**: if the plan is a `COLLSCAN` or needs a blocking
+- [x] **Stop rule**: if the plan is a `COLLSCAN` or needs a blocking
   `SORT`, stop and report the explain output. Do not add an index without
   user approval -- an index on the enqueue/resolve write path is a
   write-amplification decision (open question #2).
-- [ ] **Test**: `computeLWM` -- partition `p1` with visible pending jobs
+- [x] **Test**: `computeLWM` -- partition `p1` with visible pending jobs
   at `7e6` and `4e6`; a leased job at `1e6` (`insertJob` with a `ClaimID`
   and `VisibleAt` a minute ahead -- the stored shape of a lease), a
   delayed job at `2e6` (`VisibleAt` an hour ahead), and a resolved job at
