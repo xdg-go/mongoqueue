@@ -81,3 +81,7 @@ the caller above the primitive.
 
 **Always keep this index current: whenever a file is added to or removed from
 `docs/`, update the links above in the same change.**
+
+There is no separate decision log. Design decisions and the alternatives they
+beat are recorded in the "Rejected alternatives" section of the design doc and
+in `docs/rejected-designs.md`; do not start a `docs/decisions.md`.
