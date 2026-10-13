@@ -12,9 +12,9 @@ import (
 // fail, so the error branch exists only to satisfy the signature honestly.
 func mustReserve(t *testing.T, c *vtimeCache, tenant string, cost, weight int64) *vtimeReservation {
 	t.Helper()
-	r, err := c.reserve(context.Background(), tenant, cost, weight)
+	r, err := c.reserve(context.Background(), tenant, defaultPartition, cost, weight)
 	if err != nil {
-		t.Fatalf("reserve(%q, %d, %d): %v", tenant, cost, weight, err)
+		t.Fatalf("reserve(%q, %q, %d, %d): %v", tenant, defaultPartition, cost, weight, err)
 	}
 	return r
 }
@@ -132,7 +132,7 @@ func TestVtimeCacheConcurrentReserveCommit(t *testing.T) {
 				// No seed hook is wired, so reserve cannot fail; assert
 				// anyway rather than discard the error. t.Errorf is safe
 				// from a goroutine (t.Fatalf is not).
-				r, err := c.reserve(context.Background(), "tenant-a", cost, weight)
+				r, err := c.reserve(context.Background(), "tenant-a", defaultPartition, cost, weight)
 				if err != nil {
 					t.Errorf("reserve: %v", err)
 					return
@@ -170,7 +170,7 @@ func TestVtimeCacheSeedErrorRetries(t *testing.T) {
 	const seed = int64(42 * scale)
 	calls := 0
 	c := newVtimeCache()
-	c.seedHook = func(_ context.Context, _ string) (int64, error) {
+	c.seedHook = func(_ context.Context, _, _ string) (int64, error) {
 		calls++
 		if calls == 1 {
 			return 0, errors.New("transient seed failure")
@@ -178,11 +178,11 @@ func TestVtimeCacheSeedErrorRetries(t *testing.T) {
 		return seed, nil
 	}
 
-	if _, err := c.reserve(context.Background(), "tenant-a", 1, 1); err == nil {
+	if _, err := c.reserve(context.Background(), "tenant-a", defaultPartition, 1, 1); err == nil {
 		t.Fatal("reserve with failing seed hook: got nil error, want failure")
 	}
 
-	r, err := c.reserve(context.Background(), "tenant-a", 1, 1)
+	r, err := c.reserve(context.Background(), "tenant-a", defaultPartition, 1, 1)
 	if err != nil {
 		t.Fatalf("reserve after seed retry: %v", err)
 	}
@@ -192,5 +192,39 @@ func TestVtimeCacheSeedErrorRetries(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("seed hook calls: got %d, want 2 (one failure, one retry)", calls)
+	}
+}
+
+// TestVtimeCachePartitionsAreIndependentTimelines verifies that one tenant
+// in two partitions gets two independent timelines, each seeded once.
+func TestVtimeCachePartitionsAreIndependentTimelines(t *testing.T) {
+	seeds := map[timelineKey]int{}
+	c := newVtimeCache()
+	c.seedHook = func(_ context.Context, tenant, partition string) (int64, error) {
+		seeds[timelineKey{tenant: tenant, partition: partition}]++
+		return 0, nil
+	}
+
+	st := stride(1, 1)
+	partitions := []string{"p1", "p2"}
+	for _, p := range partitions {
+		for i := int64(1); i <= 2; i++ {
+			r, err := c.reserve(context.Background(), "tenant-a", p, 1, 1)
+			if err != nil {
+				t.Fatalf("reserve(%q): %v", p, err)
+			}
+			if want := i * st; r.vstamp != want {
+				t.Errorf("partition %q reserve %d: got vstamp %d, want %d", p, i, r.vstamp, want)
+			}
+			r.Commit()
+		}
+	}
+	for _, p := range partitions {
+		if got := seeds[timelineKey{tenant: "tenant-a", partition: p}]; got != 1 {
+			t.Errorf("seed hook calls for partition %q: got %d, want 1", p, got)
+		}
+	}
+	if len(seeds) != len(partitions) {
+		t.Errorf("seed hook called for %d timelines, want %d", len(seeds), len(partitions))
 	}
 }

@@ -71,7 +71,9 @@ func New(coll *mongo.Collection, opts ...Option) *Queue {
 	if coll != nil {
 		q.primary = coll.Clone(options.Collection().SetReadPreference(readpref.Primary()))
 	}
-	q.vtimes.seedHook = q.seedTenantVtime
+	q.vtimes.seedHook = func(ctx context.Context, tenant, _ string) (int64, error) {
+		return q.seedTenantVtime(ctx, tenant)
+	}
 	for _, opt := range opts {
 		opt(q)
 	}

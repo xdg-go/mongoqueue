@@ -361,16 +361,16 @@ Cache key, seed query, and seed index move to (tenant, partition). No
 reconcile, no LWM yet.
 
 ### 6.1.1 Cache key (`vtimecache.go`)
-- [ ] `timelineKey{tenant, partition string}`; `tenants map[string]` →
+- [x] `timelineKey{tenant, partition string}`; `tenants map[string]` →
   `map[timelineKey]*tenantVtime`; `reserve(ctx, tenant, partition, cost,
   weight)`; `seedHook(ctx, tenant, partition)`
-- [ ] `enqueue` passes `n.partition` (the normalized value that is stored)
-- [ ] Update the `vtimeCache` doc comment: timelines are per (tenant,
+- [x] `enqueue` passes `n.partition` (the normalized value that is stored)
+- [x] Update the `vtimeCache` doc comment: timelines are per (tenant,
   partition); the strictly-increasing invariant is per timeline
-- [ ] **Test** (unit): one tenant, two partitions -- reserve+commit twice
+- [x] **Test** (unit): one tenant, two partitions -- reserve+commit twice
   in each; vstamps are `1,2` in both partitions (independent timelines);
   the fake seed hook is called once per (tenant, partition)
-- [ ] **Test**: existing `vtimecache_test.go` tests pass with the new
+- [x] **Test**: existing `vtimecache_test.go` tests pass with the new
   signatures
 
 ### 6.1.2 Seed query and index (`queue.go`)

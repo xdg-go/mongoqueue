@@ -274,7 +274,7 @@ func TestColdStartSeed(t *testing.T) {
 
 	q := New(coll)
 
-	r, err := q.vtimes.reserve(ctx, "warm", cost, weight)
+	r, err := q.vtimes.reserve(ctx, "warm", defaultPartition, cost, weight)
 	if err != nil {
 		t.Fatalf("reserve for seeded tenant: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestColdStartSeed(t *testing.T) {
 
 	// A tenant with no records at all seeds at the floor of 0, so its first
 	// candidate is exactly one stride.
-	r2, err := q.vtimes.reserve(ctx, "fresh", cost, weight)
+	r2, err := q.vtimes.reserve(ctx, "fresh", defaultPartition, cost, weight)
 	if err != nil {
 		t.Fatalf("reserve for unseen tenant: %v", err)
 	}

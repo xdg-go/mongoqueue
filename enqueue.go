@@ -120,7 +120,7 @@ func (q *Queue) enqueue(ctx context.Context, kind string, body bson.Raw, opts En
 		return err
 	}
 
-	res, err := q.vtimes.reserve(ctx, n.tenantID, n.cost, n.weight)
+	res, err := q.vtimes.reserve(ctx, n.tenantID, n.partition, n.cost, n.weight)
 	if err != nil {
 		return err
 	}
