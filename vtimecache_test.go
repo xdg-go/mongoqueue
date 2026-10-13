@@ -3,8 +3,10 @@ package mongoqueue
 import (
 	"context"
 	"errors"
+	"maps"
 	"sync"
 	"testing"
+	"time"
 )
 
 // mustReserve calls reserve with a background context and fails the test on
@@ -226,5 +228,306 @@ func TestVtimeCachePartitionsAreIndependentTimelines(t *testing.T) {
 	}
 	if len(seeds) != len(partitions) {
 		t.Errorf("seed hook called for %d timelines, want %d", len(seeds), len(partitions))
+	}
+}
+
+// seedSequence is a fake seedHook that returns seeds[i] on its i-th call
+// (repeating the last value once exhausted) and counts calls.
+type seedSequence struct {
+	seeds []int64
+	calls int
+}
+
+func (s *seedSequence) hook(context.Context, string, string) (int64, error) {
+	i := min(s.calls, len(s.seeds)-1)
+	s.calls++
+	return s.seeds[i], nil
+}
+
+var defaultKey = timelineKey{tenant: "tenant-a", partition: defaultPartition}
+
+// TestVtimeCacheTouchedEntryIsInvalidated verifies that a walk marks an entry
+// reserved since the previous walk stale, so its next reserve re-runs the
+// seed and stamps from the new seed rather than the cached vtime.
+func TestVtimeCacheTouchedEntryIsInvalidated(t *testing.T) {
+	seeds := &seedSequence{seeds: []int64{0, 50_000_000}}
+	c := newVtimeCache()
+	c.seedHook = seeds.hook
+
+	mustReserve(t, c, "tenant-a", 1, 1).Commit()
+	c.invalidateAndEvict()
+
+	r := mustReserve(t, c, "tenant-a", 1, 1)
+	got := r.vstamp
+	r.Commit()
+
+	if seeds.calls != 2 {
+		t.Errorf("seed calls = %d, want 2", seeds.calls)
+	}
+	if want := int64(51_000_000); got != want {
+		t.Errorf("vstamp after invalidation = %d, want %d", got, want)
+	}
+}
+
+// TestVtimeCacheUntouchedEntryIsEvicted verifies the two-walk eviction
+// lifetime: the first walk clears touched, the second removes the entry, and
+// the next reserve creates a fresh entry that seeds.
+func TestVtimeCacheUntouchedEntryIsEvicted(t *testing.T) {
+	seeds := &seedSequence{seeds: []int64{0, 7_000_000}}
+	c := newVtimeCache()
+	c.seedHook = seeds.hook
+
+	mustReserve(t, c, "tenant-a", 1, 1).Commit()
+	orig := c.tenants[defaultKey]
+
+	c.invalidateAndEvict()
+	if c.tenants[defaultKey] != orig {
+		t.Fatal("entry left the map after the first walk")
+	}
+	if orig.touched.Load() || !orig.stale.Load() {
+		t.Fatalf("after first walk: touched=%v stale=%v, want false, true",
+			orig.touched.Load(), orig.stale.Load())
+	}
+
+	c.invalidateAndEvict()
+	if _, ok := c.tenants[defaultKey]; ok {
+		t.Fatal("entry still in the map after the second walk")
+	}
+	if !orig.evicted {
+		t.Error("evicted entry not marked evicted")
+	}
+
+	r := mustReserve(t, c, "tenant-a", 1, 1)
+	got := r.vstamp
+	r.Commit()
+
+	fresh := c.tenants[defaultKey]
+	if fresh == nil || fresh == orig {
+		t.Fatalf("reserve after eviction did not create a fresh entry")
+	}
+	if seeds.calls != 2 {
+		t.Errorf("seed calls = %d, want 2", seeds.calls)
+	}
+	if want := int64(8_000_000); got != want {
+		t.Errorf("vstamp after eviction = %d, want %d", got, want)
+	}
+}
+
+// TestVtimeCacheBusyEntryIsNotEvicted verifies that a walk finding an
+// untouched entry whose lock is held (the window between lockTimeline and
+// reserve setting touched) neither blocks nor evicts it, but marks it stale
+// so the next reserve re-seeds.
+func TestVtimeCacheBusyEntryIsNotEvicted(t *testing.T) {
+	seeds := &seedSequence{seeds: []int64{0, 30_000_000}}
+	c := newVtimeCache()
+	c.seedHook = seeds.hook
+
+	mustReserve(t, c, "tenant-a", 1, 1).Commit()
+	c.invalidateAndEvict() // clears touched
+	orig := c.tenants[defaultKey]
+	orig.stale.Store(false) // so the busy walk's stale mark is observable
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	released := make(chan struct{})
+	go func() {
+		e := c.lockTimeline(defaultKey)
+		close(locked)
+		<-release
+		e.mu.Unlock()
+		close(released)
+	}()
+
+	<-locked
+	// The walk must return while the lock is held. The timeout is a failure
+	// deadline for a walk that blocks on the entry lock, not an ordering sleep.
+	walked := make(chan struct{})
+	go func() {
+		c.invalidateAndEvict()
+		close(walked)
+	}()
+	select {
+	case <-walked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("walk blocked on a held entry lock")
+	}
+	if c.tenants[defaultKey] != orig {
+		t.Error("busy entry left the map")
+	}
+	if !orig.stale.Load() {
+		t.Error("busy entry not marked stale")
+	}
+
+	close(release)
+	<-released
+
+	r := mustReserve(t, c, "tenant-a", 1, 1)
+	got := r.vstamp
+	r.Commit()
+	if seeds.calls != 2 {
+		t.Errorf("seed calls = %d, want 2", seeds.calls)
+	}
+	if want := int64(31_000_000); got != want {
+		t.Errorf("vstamp after busy walk = %d, want %d", got, want)
+	}
+}
+
+// TestVtimeCacheEvictedEntryRetry forces an eviction between lockTimeline's
+// map lookup and its entry lock, and verifies the reserve retries onto a
+// fresh entry and stamps from its new seed, never from the orphan's vtime.
+func TestVtimeCacheEvictedEntryRetry(t *testing.T) {
+	seeds := &seedSequence{seeds: []int64{0, 90_000_000}}
+	c := newVtimeCache()
+	c.seedHook = seeds.hook
+
+	mustReserve(t, c, "tenant-a", 1, 1).Commit()
+	c.invalidateAndEvict() // clears touched so the seam's walk evicts
+	orphan := c.tenants[defaultKey]
+	// The walk above also marked the orphan stale, which would make it
+	// re-seed even if lockTimeline ignored evicted. Clear it so only the
+	// evicted check keeps the reserve off the orphan.
+	orphan.stale.Store(false)
+
+	fired := false
+	c.afterLookup = func(timelineKey) {
+		if fired {
+			return
+		}
+		fired = true
+		c.invalidateAndEvict()
+	}
+
+	r := mustReserve(t, c, "tenant-a", 1, 1)
+	got := r.vstamp
+	r.Commit()
+
+	if !fired {
+		t.Fatal("afterLookup seam never fired")
+	}
+	if !orphan.evicted {
+		t.Error("orphan not marked evicted")
+	}
+	fresh := c.tenants[defaultKey]
+	if fresh == nil || fresh == orphan {
+		t.Fatal("reserve did not land on a fresh map entry")
+	}
+	if seeds.calls != 2 {
+		t.Errorf("seed calls = %d, want 2", seeds.calls)
+	}
+	// Stamping from the orphan (vtime 1e6, not stale) would have given 2e6.
+	if want := int64(91_000_000); got != want {
+		t.Errorf("vstamp = %d, want %d (from new seed)", got, want)
+	}
+}
+
+// TestVtimeCacheReconcileRace runs concurrent reserve+commit on two
+// timelines against a walk loop. A seed hook that returns the durable
+// maximum must keep each timeline's stamps contiguous however walks
+// interleave with reservations.
+func TestVtimeCacheReconcileRace(t *testing.T) {
+	const (
+		perWorker = 100
+		workers   = 2
+		unit      = int64(1_000_000) // stride(1, 1)
+	)
+	partitions := []string{"p1", "p2"}
+
+	var mu sync.Mutex
+	durable := map[string]int64{}
+	stamps := map[string][]int64{}
+	seedCalls := map[string]int{}
+
+	c := newVtimeCache()
+	c.seedHook = func(_ context.Context, _, partition string) (int64, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		seedCalls[partition]++
+		return durable[partition], nil
+	}
+
+	var wg sync.WaitGroup
+	for _, p := range partitions {
+		for range workers {
+			wg.Go(func() {
+				for range perWorker {
+					r, err := c.reserve(context.Background(), "tenant-a", p, 1, 1)
+					if err != nil {
+						t.Errorf("reserve: %v", err)
+						return
+					}
+					mu.Lock()
+					durable[p] = max(durable[p], r.vstamp)
+					stamps[p] = append(stamps[p], r.vstamp)
+					mu.Unlock()
+					r.Commit()
+				}
+			})
+		}
+	}
+
+	done := make(chan struct{})
+	// The walker counts evictions per partition by diffing map snapshots taken
+	// around each walk: a key whose entry pointer vanished was evicted.
+	type walkStats struct {
+		walks     int
+		evictions map[string]int
+	}
+	snapshot := func() map[timelineKey]*tenantVtime {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return maps.Clone(c.tenants)
+	}
+	walked := make(chan walkStats)
+	go func() {
+		st := walkStats{evictions: map[string]int{}}
+		for {
+			select {
+			case <-done:
+				walked <- st
+				return
+			default:
+				before := snapshot()
+				c.invalidateAndEvict()
+				after := snapshot()
+				st.walks++
+				for k, v := range before {
+					if after[k] != v {
+						st.evictions[k.partition]++
+					}
+				}
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(done)
+	ws := <-walked
+
+	for _, p := range partitions {
+		seen := make(map[int64]bool, len(stamps[p]))
+		for _, s := range stamps[p] {
+			if seen[s] {
+				t.Errorf("partition %s: duplicate vstamp %d", p, s)
+			}
+			seen[s] = true
+		}
+		want := workers * perWorker
+		if len(seen) != want {
+			t.Errorf("partition %s: %d distinct vstamps, want %d", p, len(seen), want)
+		}
+		for i := 1; i <= want; i++ {
+			if !seen[int64(i)*unit] {
+				t.Errorf("partition %s: missing vstamp %d", p, int64(i)*unit)
+			}
+		}
+	}
+	// Re-seeds after the initial one are driven by invalidation or eviction;
+	// subtracting evictions approximates the invalidation-driven share (an
+	// eviction not followed by a reserve overcounts by one).
+	t.Logf("walks=%d", ws.walks)
+	for _, p := range partitions {
+		reseeds := seedCalls[p] - 1
+		t.Logf("partition %s: seed calls=%d evictions=%d invalidation re-seeds~=%d",
+			p, seedCalls[p], ws.evictions[p], reseeds-ws.evictions[p])
 	}
 }

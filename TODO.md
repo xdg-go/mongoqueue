@@ -403,35 +403,35 @@ No LWM yet: `reconcile` skips the LWM step until 6.3 adds it, and the
 seed is still `max pending or 0`.
 
 ### 6.2.1 Cache mechanics (`vtimecache.go`)
-- [ ] Add `touched`, `stale` (both `atomic.Bool`) and `evicted` to the
+- [x] Add `touched`, `stale` (both `atomic.Bool`) and `evicted` to the
   entry; `reserve`, holding the entry lock, sets `touched` and applies
   `stale` to `seeded` per 6.0
-- [ ] Factor lookup-lock-retry into `lockTimeline(key) *tenantVtime` with
+- [x] Factor lookup-lock-retry into `lockTimeline(key) *tenantVtime` with
   the `afterLookup` test seam (6.0); `reserve` uses it
-- [ ] `(*vtimeCache).invalidateAndEvict()` implementing the walk in 6.0
+- [x] `(*vtimeCache).invalidateAndEvict()` implementing the walk in 6.0
   (no I/O, never blocks on an entry lock, returns nothing)
-- [ ] Update the `vtimeCache` and `seedHook` doc comments: describe the
+- [x] Update the `vtimeCache` and `seedHook` doc comments: describe the
   re-seed-after-reconcile cycle, the two-walk eviction lifetime, and the
   lock order
-- [ ] **Test**: touched entry is invalidated -- reserve+commit, walk, next
+- [x] **Test**: touched entry is invalidated -- reserve+commit, walk, next
   reserve calls `seedHook` again and stamps from the new seed (fake hook
   returning a different value the second time)
-- [ ] **Test**: untouched entry is evicted -- reserve+commit, walk (clears
+- [x] **Test**: untouched entry is evicted -- reserve+commit, walk (clears
   `touched`, marks stale), walk again: entry gone from the map; next
   reserve creates a fresh entry and seeds
-- [ ] **Test**: busy entry is not evicted, and the walk does not block --
+- [x] **Test**: busy entry is not evicted, and the walk does not block --
   reserve+commit, walk (clears `touched`). Then, from one goroutine, call
   `lockTimeline` directly and hold the entry lock without setting
   `touched` (simulating the window before `reserve` sets it). Run a walk
   on the test goroutine: it returns while the lock is still held, the
   entry is still in the map, and `stale` is set. Release the lock; the
   next reserve re-seeds. Order steps with channels, not sleeps.
-- [ ] **Test**: evicted-entry retry -- set `afterLookup` to run a walk that
+- [x] **Test**: evicted-entry retry -- set `afterLookup` to run a walk that
   evicts the entry (pre-clear `touched` with an earlier walk); assert the
   reserve lands on a fresh map entry (seed hook called again), the orphan
   has `evicted == true`, and the resulting vstamp comes from the new seed,
   not the orphan's vtime
-- [ ] **Test**: race -- 2 goroutines per timeline × 2 timelines × 100
+- [x] **Test**: race -- 2 goroutines per timeline × 2 timelines × 100
   reserve+commit each, while a fifth goroutine calls the walk in a loop.
   The fake seed hook returns the timeline's current durable maximum, which
   the test tracks under a mutex and updates **after reserve and before
