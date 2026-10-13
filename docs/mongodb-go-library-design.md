@@ -599,7 +599,9 @@ a rebuild.
    liveness: 1, vstamp: -1}`, serves the per-timeline trailing edge that both
    the cold-start seed and reconciliation's re-seed read; the low-water mark
    is a partition's dispatch frontier, read with the claim filter on the claim
-   index. Explain results and the as-built summary land in "Indexes,
+   index. As built through 6.2, reconciliation adds no index: its re-seed is
+   the existing seed query, served by the seed index. The frontier access path
+   is pending 6.3. Explain results and the as-built summary land in "Indexes,
    contention, and GC" when Phase 6 completes; this entry then becomes a
    pointer.
 3. **Reconciliation and cache surface.** Decided in Phase 6 (see `TODO.md` 6.0

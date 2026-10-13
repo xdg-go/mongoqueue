@@ -440,10 +440,10 @@ seed is still `max pending or 0`.
   eviction and invalidation counts.
 
 ### 6.2.2 Queue-level reconcile (`queue.go`)
-- [ ] Unexported `(q *Queue) reconcile(ctx) error`: calls
+- [x] Unexported `(q *Queue) reconcile(ctx) error`: calls
   `q.vtimes.invalidateAndEvict()` and returns nil (6.3 adds the LWM step
   ahead of it)
-- [ ] **Test**: trailing cancellation is refunded. Isolate the tenants in
+- [x] **Test**: trailing cancellation is refunded. Isolate the tenants in
   their own partitions so the values survive 6.3's cold-seed refresh:
   (1) tenant `b` in partition `pb` enqueues `b-000`..`b-002`
   (`1e6..3e6`), `Cancel(b-002)`, enqueue `b-003`: `4e6` (no reconcile;
@@ -451,15 +451,15 @@ seed is still `max pending or 0`.
   enqueues `a-000`..`a-002` (`1e6..3e6`), `Cancel(a-002)`, `reconcile`,
   enqueue `a-003`: `3e6` (edge `2e6` + stride). Under 6.3 the frontier of
   `pa` at reconcile is `1e6`, below `a`'s edge, so the value holds.
-- [ ] **Test**: external-writer drift is corrected -- enqueue `a-000`
+- [x] **Test**: external-writer drift is corrected -- enqueue `a-000`
   (`1e6`), `insertJob` a full pending `Job` for tenant `a` at vstamp
   `50e6` (`Partition: defaultPartition`, another writer's stamp),
   `reconcile`, enqueue: `51e6`. A second `insertJob` for `a` at `90e6` in
   partition `other` must not affect the default-partition stamp.
-- [ ] **Test**: idle timeline is evicted end to end -- enqueue for tenant
+- [x] **Test**: idle timeline is evicted end to end -- enqueue for tenant
   `a`, `reconcile` twice with no enqueue between; `a`'s key is absent from
   `q.vtimes.tenants`
-- [ ] **Doc**: design doc "Reconciliation" -- confirm the lazy-invalidation
+- [x] **Doc**: design doc "Reconciliation" -- confirm the lazy-invalidation
   paragraph (D2) and the eviction rule match the implementation; mongodb
   doc open question #2 -- record the answer (no new index; seed index
   serves the trailing edge; frontier access path pending 6.3)

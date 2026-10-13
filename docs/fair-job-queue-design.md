@@ -198,9 +198,11 @@ to the cache and without the fence an eager rewrite would need to avoid
 lowering vtime below a concurrently inserted job. The re-seed sets vtime to
 the greater of the trailing edge and the low-water mark (below); a timeline
 with no pending jobs has no trailing edge and takes the low-water mark alone,
-which is how a drained or returning tenant is placed. Entries left untouched
-across consecutive reconciliations are evicted, bounding cache memory; an
-evicted tenant is re-seeded the same way on its next enqueue.
+which is how a drained or returning tenant is placed. An entry enqueued to
+since the previous reconciliation is marked stale; an entry untouched since
+then is evicted, so an idle entry is evicted on the second consecutive
+untouched pass, up to two intervals after its last enqueue. This bounds cache
+memory; an evicted tenant is re-seeded the same way on its next enqueue.
 
 ### Low-water mark and the idle floor
 

@@ -221,3 +221,16 @@ func (q *Queue) EnsureTTLIndex(ctx context.Context, retention time.Duration) err
 	}
 	return nil
 }
+
+// reconcile bounds vtime cache drift: each timeline reserved since the
+// previous reconcile is marked stale, so its next enqueue re-seeds from the
+// trailing edge (picking up other writers' stamps and trailing cancellation
+// refunds), and each timeline idle since then is evicted. A done ctx returns
+// its error and leaves the cache untouched.
+func (q *Queue) reconcile(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("mongoqueue: reconcile: %w", err)
+	}
+	q.vtimes.invalidateAndEvict()
+	return nil
+}
