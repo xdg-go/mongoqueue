@@ -77,6 +77,7 @@ func New(coll *mongo.Collection, opts ...Option) *Queue {
 		q.primary = coll.Clone(options.Collection().SetReadPreference(readpref.Primary()))
 	}
 	q.vtimes.seedHook = q.seedTenantVtime
+	q.vtimes.lwmHook = q.computeLWM
 	for _, opt := range opts {
 		opt(q)
 	}
@@ -90,11 +91,11 @@ func New(coll *mongo.Collection, opts ...Option) *Queue {
 // Resolved jobs are excluded -- their timeline slots are already consumed and
 // TTL-collected records must not pin the floor.
 //
-// Today the seed runs once per timeline per node. Reconciliation (Phase
-// 6.2-6.3) will invalidate entries so each timeline's next enqueue re-runs
-// this query, floored by the partition's dispatch frontier (its low-water
-// mark, LWM); re-seeding will track other writers, cancellation refunds, and
-// restarts.
+// The seed runs on a timeline's first enqueue on this node and again on its
+// first enqueue after each reconcile, so re-seeding tracks other writers,
+// cancellation refunds, and restarts. The cache floors the result by the
+// partition's dispatch frontier (its low-water mark, LWM; see computeLWM);
+// this query returns only the trailing edge.
 //
 // The read goes to the primary so it cannot see a trailing edge older than a
 // stamp this node issued. Primary routing is not sufficient on its own: the
@@ -249,14 +250,21 @@ func (q *Queue) EnsureTTLIndex(ctx context.Context, retention time.Duration) err
 	return nil
 }
 
-// reconcile bounds vtime cache drift: each timeline reserved since the
-// previous reconcile is marked stale, so its next enqueue re-seeds from the
-// trailing edge (picking up other writers' stamps and trailing cancellation
-// refunds), and each timeline idle since then is evicted. A done ctx returns
-// its error and leaves the cache untouched.
+// reconcile bounds vtime cache drift. It first refreshes the LWM of every
+// partition present in the cache; then each timeline reserved since the
+// previous reconcile is marked stale, so its next enqueue re-seeds to
+// max(trailing edge, LWM) (picking up other writers' stamps and trailing
+// cancellation refunds), and each timeline idle since then is evicted. A done
+// ctx or a failed LWM refresh returns its error and leaves the cache
+// untouched: no invalidation, no eviction.
 func (q *Queue) reconcile(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("mongoqueue: reconcile: %w", err)
+	}
+	for _, partition := range q.vtimes.partitions() {
+		if err := q.vtimes.refreshLWM(ctx, partition); err != nil {
+			return fmt.Errorf("mongoqueue: reconcile: refresh LWM for partition %q: %w", partition, err)
+		}
 	}
 	q.vtimes.invalidateAndEvict()
 	return nil

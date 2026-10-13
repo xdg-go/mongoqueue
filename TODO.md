@@ -350,6 +350,12 @@ After 6.3 (cold seeds refresh the partition's frontier):
   in the future, so the frontier query deliberately finds nothing
   (`ok == false`, LWM 0) and the test keeps asserting the seed alone.
   Assertions unchanged.
+- `TestClaimOrdersByVStampThenID`: the three new tenants' cold seeds find
+  `a-costly`'s frontier at `10e6`, so they no longer tie at `1e6`. The
+  test is about claim ordering, not stamping: insert all four fixtures
+  via `insertJob` (full `Job` records, `Partition: defaultPartition`) at
+  fixed vstamps (`a-costly` `10e6`; `z-cheap`, `tie-b`, `tie-a` `1e6`).
+  Assertions and the comment's claims unchanged.
 - `TestFairnessSingleTenant`, `TestFairnessSameTenantCostNoReorder`: one
   tenant into an empty partition; unchanged.
 
@@ -494,33 +500,33 @@ seed is still `max pending or 0`.
   with an explicit `Partition`.
 
 ### 6.3.2 Floor in the cache (`vtimecache.go`, `queue.go`)
-- [ ] Add `lwmHook`, `lwm`, `lwmMu`, `refreshLWM`, `lwmFor` per 6.0; `New`
+- [x] Add `lwmHook`, `lwm`, `lwmMu`, `refreshLWM`, `lwmFor` per 6.0; `New`
   wires `lwmHook = q.computeLWM`
-- [ ] `reserve` seed branch: cold seed refreshes the partition's LWM first;
+- [x] `reserve` seed branch: cold seed refreshes the partition's LWM first;
   both seed paths take `max(edge, lwmFor(partition))` (6.0 "LWM state")
-- [ ] `reconcile` snapshots the set of partitions present in the cache
+- [x] `reconcile` snapshots the set of partitions present in the cache
   (under the global lock, no I/O), calls `refreshLWM` for each, and on
   the first error returns it wrapped and skips the walk
-- [ ] Rework `TestColdStartSeed` fixtures per 6.0 (assertions unchanged)
-- [ ] Update the Phase 5 tests listed under 6.0 "After 6.3", exactly as
+- [x] Rework `TestColdStartSeed` fixtures per 6.0 (assertions unchanged)
+- [x] Update the Phase 5 tests listed under 6.0 "After 6.3", exactly as
   listed, with comments stating the rule each now proves
-- [ ] **Test** (unit): cold seed refreshes -- first reserve for `(a, p1)`
+- [x] **Test** (unit): cold seed refreshes -- first reserve for `(a, p1)`
   calls `lwmHook("p1")` once; first reserve for `(b, p1)` calls it again;
   first reserve for `(a, p2)` calls `lwmHook("p2")`; a re-seed after a
   walk does not call `lwmHook`
-- [ ] **Test** (unit): cold-seed hook failure fails the reserve and is not
+- [x] **Test** (unit): cold-seed hook failure fails the reserve and is not
   memoized -- hook fails once, reserve fails, next reserve retries and
   succeeds
-- [ ] **Test** (unit): tracks the frontier, no hold -- `refreshLWM("p")`
+- [x] **Test** (unit): tracks the frontier, no hold -- `refreshLWM("p")`
   with the hook returning `10e6`, then `6e6`, then `(0, false)`: `lwmFor`
   reads `10e6`, `6e6`, `6e6`
-- [ ] **Test** (unit): seed takes the max -- seed hook `3e6`, LWM `10e6`
+- [x] **Test** (unit): seed takes the max -- seed hook `3e6`, LWM `10e6`
   → first vstamp `10e6 + stride`; seed hook `12e6`, LWM `10e6` →
   `12e6 + stride`
-- [ ] **Test** (unit): failed refresh leaves the cache untouched -- touched
+- [x] **Test** (unit): failed refresh leaves the cache untouched -- touched
   entry stays seeded after a `reconcile` whose `lwmHook` fails for one of
   two partitions
-- [ ] **Test**: idle tenant resumes at the frontier, not stale vtime and not
+- [x] **Test**: idle tenant resumes at the frontier, not stale vtime and not
   buried -- one Queue, default partition. Tenant `a` enqueues
   `a-000`..`a-002` (`1e6..3e6`); claim and complete all three (`a`
   drained, cached vtime `3e6`). Tenant `b` enqueues `b-000`..`b-019`: its
@@ -530,22 +536,22 @@ seed is still `max pending or 0`.
   with `drainOrder`: `b-010, a-003, b-011, ..., b-019` (`a-003` ties
   `b-011` at `12e6`; `a-` < `b-`). Stale credit would stamp `a-003` at
   `4e6`; the trailing-edge LWM would stamp it at `21e6`.
-- [ ] **Test**: returning tenant that floods interleaves at its share
+- [x] **Test**: returning tenant that floods interleaves at its share
   (memoryless) -- same setup through `reconcile`, then `a` enqueues
   `a-003`..`a-022` (`12e6..31e6`). Drain: `b-010`, then `a-003, b-011,
   a-004, b-012, ..., a-011, b-019`, then `a-012`..`a-022`. `b` drains at
   claim 19, `a` at claim 30. Comment: the floor sets where `a` starts; the
   stride sets its share.
-- [ ] **Test**: cold node floors a new tenant -- Queue 1 enqueues `b-000`
+- [x] **Test**: cold node floors a new tenant -- Queue 1 enqueues `b-000`
   ..`b-019` and claims+completes 10; Queue 2 (fresh, same collection,
   Queue 1 discarded) enqueues new tenant `c`: vstamp `12e6` (its cold seed
   refreshes the frontier; no `reconcile` is called on Queue 2)
-- [ ] **Test**: lanes are independent -- tenant `b` enqueues 20 jobs in
+- [x] **Test**: lanes are independent -- tenant `b` enqueues 20 jobs in
   partition `slow` (none claimed; frontier `1e6`) and 20 in partition
   `fast` (claim+complete 10; frontier `11e6`). Tenant `c` enqueues one job
   in `fast`: `12e6`; then one in `slow`: `2e6`. A shared timeline would
   have stamped the `slow` job `13e6`.
-- [ ] **Test**: a pending job in one lane does not refund consumption in
+- [x] **Test**: a pending job in one lane does not refund consumption in
   another -- `insertJob` pending visible jobs for tenant `b` in `fast` at
   `11e6..20e6`. Tenant `a` enqueues `a-slow` in `slow` (`1e6`) and
   `a-f00` in `fast` (cold seed finds frontier `11e6`: `12e6`). Claim
@@ -554,17 +560,17 @@ seed is still `max pending or 0`.
   `fast`: `b-011, a-f01, b-012, ..., b-019`. Under a shared timeline the
   re-seed would have landed on `a-slow`'s `1e6` and stamped `a-f01` at
   `2e6`.
-- [ ] **Test**: extend 6.2.1's race test with an `lwmHook` returning
+- [x] **Test**: extend 6.2.1's race test with an `lwmHook` returning
   `(0, true)` and the walk loop calling `refreshLWM` for both partitions
   before each walk; contiguity `{1..200}×stride` must still hold. (A
   nonzero floor would legitimately shift the first stamp, so use 0.)
-- [ ] **Doc**: design doc "Low-water mark and the idle floor" and
+- [x] **Doc**: design doc "Low-water mark and the idle floor" and
   "Sparse-tenant responsiveness" -- confirm the D1 wording (frontier per
   partition, no hold, cold-seed refresh plus reconcile) matches the
   implementation and add the worked example from the idle-tenant test;
   mongodb doc open question #2 -- the frontier access path, explain
   results
-- [ ] **Doc audit**: grep both design docs for "low-water", "LWM",
+- [x] **Doc audit**: grep both design docs for "low-water", "LWM",
   "floor", "pending set", "trailing edge", and "per-tenant" and fix every
   statement the per-partition, memoryless definition contradicts
 

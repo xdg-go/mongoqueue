@@ -178,14 +178,14 @@ cache's soft state -- from that tenant's pending jobs in that partition
 (pending includes leased, in-flight jobs, which are still owed service). Two
 reconstructions of that vtime trade cost against robustness:
 
-- **Trailing edge** (the tenant's highest pending vstamp): cheap, and
+- **Trailing edge** (the timeline's highest pending vstamp): cheap, and
   self-corrects trailing job cancellation, since a cancelled top job drops the
   max. Trusts the stored stamps, so correct only under
   single-writer-per-timeline.
 - **Backlog** (LWM plus the sum of the tenant's pending strides): re-derives
   vtime from queued work rather than stored stamps, bounding multi-writer
   compression to one interval and flooring a drained tenant automatically.
-  Costs a per-tenant aggregation.
+  Costs a per-timeline aggregation.
 
 This model chooses to use **trailing edge**, with the expectation that
 single-writer-per-timeline is satisfied or that the deviations described later
@@ -224,6 +224,13 @@ lease re-enters the visible set, and the floor follows it, because the floor's
 job is to place a tenant at the actual point of service. A computation that
 finds no visible job leaves the previous value in place.
 
+A timeline whose cache entry is current is not re-seeded, so the floor
+reaches it only at its next re-seed. A tenant that drains and returns within
+one reconciliation interval keeps its cached vtime, and a re-seed uses the LWM
+from the last reconciliation, which may lag the live frontier. Both errors are
+bounded by how far the frontier advances in one interval, the same staleness
+bound as the cache itself.
+
 When a timeline is seeded or re-seeded, its vtime becomes the greater of its
 trailing edge and the partition's LWM. A tenant whose stale vtime sits far
 below the frontier is lifted to it and takes its weighted share from there;
@@ -235,7 +242,9 @@ whose vtime sits too high -- that case is cancellation.
 
 Worked example, one partition, equal weights. Tenant b has jobs stamped 1..20
 and the first ten have been served, so the frontier is 11. Tenant a drained
-long ago with a cached vtime of 3 and now enqueues again. With no floor its
+long ago with a cached vtime of 3. A reconciliation has since run, so a's entry is
+stale (or evicted) and the partition's LWM is 11. a now enqueues again; it
+has no trailing edge, so its re-seed takes the LWM alone. With no floor its
 job is stamped 4 and dispatches before b's ten remaining jobs (stale credit).
 Floored to the frontier it is stamped 12 and interleaves with b from the next
 claim. If a enqueues twenty jobs they are stamped 12..31 and alternate with
@@ -603,7 +612,8 @@ job lands one stride past the job about to be served: it joins at the point of
 service, neither jumping work already being served nor waiting behind another
 tenant's backlog. This gives a sparse tenant latency (its one job is near the
 front) without giving it throughput it has not earned (its tenth job in a burst
-sits behind the incumbents' tenth).
+sits behind the incumbents' tenth). The worked example under "Low-water mark
+and the idle floor" shows the placement.
 
 **Clock discipline.** Visibility comparisons mix timestamps written at
 enqueue with the clock consulted at claim, and no storage backend guarantees
@@ -664,8 +674,9 @@ record; it re-enters the visible set and still dispatches, so it is not GC's
 concern.) The terminal write records a resolution timestamp so reclamation
 has a durable key to age on. An implementation should reclaim resolved
 records on some cadence
-and evict idle-tenant cache entries (an evicted tenant simply re-floors to the
-LWM on its next enqueue, the onboarding path, so eviction is safe). Treat this
+and evict idle-tenant cache entries (an evicted tenant is re-seeded to the
+greater of its trailing edge and the LWM on its next enqueue, the onboarding
+path, so eviction is safe). Treat this
 as an operational obligation to specify, not a fairness mechanism.
 
 ## Correctness invariants
@@ -688,7 +699,8 @@ A model or test suite should establish:
   lease holder -- stolen from or cancelled out from under -- cannot resolve the
   job, because the fence rejects its terminal write.
 - **Memoryless placement:** a tenant that becomes backlogged in a partition
-  is placed within one stride of that partition's frontier. It neither
+  is placed within one stride of that partition's frontier, up to the
+  cache's one-interval staleness. It neither
   dispatches ahead of the frontier on credit from past idleness nor waits
   behind another tenant's backlog; from its first job it receives its
   weighted share.

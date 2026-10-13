@@ -231,25 +231,6 @@ func TestNodeID(t *testing.T) {
 	}
 }
 
-// seedRecord names the fields the cold-start seed query reads; the full Job
-// schema is not needed because the seed filters on tenant, partition, and
-// pending liveness and projects vstamp alone.
-type seedRecord struct {
-	ID        string   `bson:"_id"`
-	Tenant    string   `bson:"tenant"`
-	Partition string   `bson:"partition"`
-	Liveness  Liveness `bson:"liveness"`
-	VStamp    int64    `bson:"vstamp"`
-}
-
-// seedDoc inserts a minimal job document for cold-start seed tests.
-func seedDoc(ctx context.Context, t *testing.T, coll *mongo.Collection, doc seedRecord) {
-	t.Helper()
-	if _, err := coll.InsertOne(ctx, doc); err != nil {
-		t.Fatalf("insert seed doc %q: %v", doc.ID, err)
-	}
-}
-
 // TestColdStartSeed verifies the vtime cache's cold-start seed: the first
 // reserve for a (tenant, partition) timeline with pending records starts from
 // the max pending vstamp in that partition (resolved records and other
@@ -259,7 +240,7 @@ func TestColdStartSeed(t *testing.T) {
 
 	db := mongotest.Connect(t)
 	ctx := opCtx(t)
-	coll := db.Collection("jobs")
+	q := New(db.Collection("jobs"))
 
 	const (
 		maxPending = 12 * scale
@@ -270,13 +251,14 @@ func TestColdStartSeed(t *testing.T) {
 	// higher vstamp, which must NOT influence the seed: resolved slots are
 	// already consumed and may be TTL-collected at any time. A pending record
 	// for "warm" in another partition, also higher, must not influence it
-	// either: each partition is its own timeline.
-	seedDoc(ctx, t, coll, seedRecord{ID: "j1", Tenant: "warm", Partition: defaultPartition, Liveness: LivenessPending, VStamp: 5 * scale})
-	seedDoc(ctx, t, coll, seedRecord{ID: "j2", Tenant: "warm", Partition: defaultPartition, Liveness: LivenessPending, VStamp: maxPending})
-	seedDoc(ctx, t, coll, seedRecord{ID: "j3", Tenant: "warm", Partition: defaultPartition, Liveness: LivenessResolved, VStamp: 99 * scale})
-	seedDoc(ctx, t, coll, seedRecord{ID: "j4", Tenant: "warm", Partition: "other", Liveness: LivenessPending, VStamp: 50 * scale})
-
-	q := New(coll)
+	// either: each partition is its own timeline. Every record is visible an
+	// hour from now, so the cold seed's frontier refresh finds nothing (LWM
+	// 0) and the seed alone sets the first vstamp.
+	later := time.Now().Add(time.Hour)
+	insertJob(ctx, t, q, Job{ID: "j1", TenantID: "warm", Partition: defaultPartition, Liveness: LivenessPending, VStamp: 5 * scale, VisibleAt: later})
+	insertJob(ctx, t, q, Job{ID: "j2", TenantID: "warm", Partition: defaultPartition, Liveness: LivenessPending, VStamp: maxPending, VisibleAt: later})
+	insertJob(ctx, t, q, Job{ID: "j3", TenantID: "warm", Partition: defaultPartition, Liveness: LivenessResolved, VStamp: 99 * scale, VisibleAt: later})
+	insertJob(ctx, t, q, Job{ID: "j4", TenantID: "warm", Partition: "other", Liveness: LivenessPending, VStamp: 50 * scale, VisibleAt: later})
 
 	r, err := q.vtimes.reserve(ctx, "warm", defaultPartition, cost, weight)
 	if err != nil {

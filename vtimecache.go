@@ -32,11 +32,11 @@ import (
 // different timelines proceed concurrently. A single global lock held across
 // inserts would serialize all timelines behind one slow write.
 //
-// Lock order is global mu, then entry mu, then the frontier lock (lwmMu, the
-// LWM lock added in Phase 6.3).
-// Only eviction holds the global lock while taking an entry lock, and only
-// with TryLock; reserve releases the global lock before taking the entry
-// lock. Never acquire in the reverse direction.
+// Lock order is global mu, then entry mu, then lwmMu. Only eviction holds the
+// global lock while taking an entry lock, and only with TryLock; reserve
+// releases the global lock before taking the entry lock. Only the seed path
+// takes lwmMu under an entry lock. Never acquire in the reverse direction. No
+// I/O is done while holding mu or lwmMu.
 type vtimeCache struct {
 	mu      sync.Mutex
 	tenants map[timelineKey]*tenantVtime
@@ -55,8 +55,24 @@ type vtimeCache struct {
 	// leaves the timeline unseeded, so the next reserve retries the seed.
 	// It runs again on the first reserve after a reconcile marks the entry
 	// stale, and on the first reserve after an eviction, so it must be safe
-	// to call repeatedly for the same timeline.
+	// to call repeatedly for the same timeline. The seed is the trailing
+	// edge only; reserve floors it by the partition's LWM (see lwmHook).
 	seedHook func(ctx context.Context, tenant, partition string) (int64, error)
+
+	// lwmHook, when non-nil, returns a partition's dispatch frontier (its
+	// low-water mark, LWM): the vstamp the next claim there would take. ok is
+	// false when the partition has no visible pending job. Queue wires it to
+	// computeLWM. Nil means the LWM is always 0. Every seed takes
+	// max(trailing edge, LWM), so a new, evicted, or returning timeline joins
+	// at the point of service rather than claiming credit for idle time.
+	lwmHook func(ctx context.Context, partition string) (lwm int64, ok bool, err error)
+
+	// lwm holds each partition's last computed frontier; a missing key reads
+	// as 0. It is refreshed by a cold seed (refreshLWM before the first seed of
+	// an entry) and by reconcile for every cached partition. lwmMu guards only
+	// this map, never across I/O.
+	lwmMu sync.Mutex
+	lwm   map[string]int64
 }
 
 // timelineKey identifies one virtual-time timeline. partition is the
@@ -72,18 +88,67 @@ type timelineKey struct {
 // touched and stale are atomics so the reconcile walk can read and set them
 // without taking mu, and so never blocks on an in-flight reservation.
 type tenantVtime struct {
-	mu      sync.Mutex
-	vtime   int64
-	seeded  bool        // guarded by mu; cleared when stale is applied
-	evicted bool        // guarded by mu; set once, before the entry leaves the map
-	touched atomic.Bool // set by every reserve; cleared by the walk
-	stale   atomic.Bool // set by the walk; applied to seeded by the next reserve
+	mu     sync.Mutex
+	vtime  int64
+	seeded bool // guarded by mu; cleared when stale is applied
+	// everSeeded is guarded by mu and set by the entry's first successful
+	// seed; a seed with it unset is a cold seed, which refreshes the LWM.
+	everSeeded bool
+	evicted    bool        // guarded by mu; set once, before the entry leaves the map
+	touched    atomic.Bool // set by every reserve; cleared by the walk
+	stale      atomic.Bool // set by the walk; applied to seeded by the next reserve
 }
 
 // newVtimeCache returns an empty cache; timelines are created lazily on
 // first reserve.
 func newVtimeCache() *vtimeCache {
-	return &vtimeCache{tenants: make(map[timelineKey]*tenantVtime)}
+	return &vtimeCache{
+		tenants: make(map[timelineKey]*tenantVtime),
+		lwm:     make(map[string]int64),
+	}
+}
+
+// refreshLWM recomputes partition's frontier with lwmHook and stores it. The
+// stored value tracks the frontier, dips included (plain overwrite, no max);
+// a computation that finds no visible job (ok false) leaves the prior value.
+// A hook error is returned and nothing is stored. The hook runs without
+// lwmMu held.
+func (c *vtimeCache) refreshLWM(ctx context.Context, partition string) error {
+	if c.lwmHook == nil {
+		return nil
+	}
+	lwm, ok, err := c.lwmHook(ctx, partition)
+	if err != nil {
+		return err
+	}
+	if ok {
+		c.lwmMu.Lock()
+		c.lwm[partition] = lwm
+		c.lwmMu.Unlock()
+	}
+	return nil
+}
+
+// lwmFor returns partition's last computed frontier, or 0 if none.
+func (c *vtimeCache) lwmFor(partition string) int64 {
+	c.lwmMu.Lock()
+	defer c.lwmMu.Unlock()
+	return c.lwm[partition]
+}
+
+// partitions returns the distinct partitions present in the cache.
+func (c *vtimeCache) partitions() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	seen := make(map[string]bool)
+	var out []string
+	for key := range c.tenants {
+		if !seen[key.partition] {
+			seen[key.partition] = true
+			out = append(out, key.partition)
+		}
+	}
+	return out
 }
 
 // vtimeReservation is the exclusivity guard returned by reserve. It holds the
@@ -107,10 +172,14 @@ type vtimeReservation struct {
 // cost and weight must already be normalized (see normalizeCost and
 // normalizeWeight); reserve applies stride directly.
 //
-// reserve fails only when the one-shot seed hook fails; the timeline's lock
-// is released and the timeline stays unseeded, so a later reserve retries
-// the seed. ctx bounds only the seed query and is unused after a timeline is
-// seeded.
+// A seed sets vtime to max(trailing edge, lwmFor(partition)). A cold seed
+// (the entry's first) refreshes the partition's LWM first; a re-seed after
+// reconcile uses the LWM reconcile stored.
+//
+// reserve fails only when the seed hook or the cold seed's LWM refresh
+// fails; the timeline's lock is released and the timeline stays unseeded, so
+// a later reserve retries the seed. ctx bounds only those queries and is
+// unused after a timeline is seeded.
 func (c *vtimeCache) reserve(ctx context.Context, tenant, partition string, cost, weight int64) (*vtimeReservation, error) {
 	t := c.lockTimeline(timelineKey{tenant: tenant, partition: partition})
 	t.touched.Store(true)
@@ -118,17 +187,33 @@ func (c *vtimeCache) reserve(ctx context.Context, tenant, partition string, cost
 		t.seeded = false
 	}
 	if !t.seeded {
-		if c.seedHook != nil {
-			seed, err := c.seedHook(ctx, tenant, partition)
-			if err != nil {
-				t.mu.Unlock()
-				return nil, err
-			}
-			t.vtime = seed
+		if err := c.seed(ctx, t, tenant, partition); err != nil {
+			t.mu.Unlock()
+			return nil, err
 		}
-		t.seeded = true
 	}
 	return &vtimeReservation{tenant: t, vstamp: t.vtime + stride(cost, weight)}, nil
+}
+
+// seed sets t's vtime to max(trailing edge, LWM) and marks it seeded. The
+// caller holds t.mu. On error t is left unseeded.
+func (c *vtimeCache) seed(ctx context.Context, t *tenantVtime, tenant, partition string) error {
+	if !t.everSeeded {
+		if err := c.refreshLWM(ctx, partition); err != nil {
+			return err
+		}
+	}
+	var edge int64
+	if c.seedHook != nil {
+		var err error
+		if edge, err = c.seedHook(ctx, tenant, partition); err != nil {
+			return err
+		}
+	}
+	t.vtime = max(edge, c.lwmFor(partition))
+	t.seeded = true
+	t.everSeeded = true
+	return nil
 }
 
 // lockTimeline returns the map entry for key, creating it if absent, with its

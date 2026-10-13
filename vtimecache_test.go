@@ -421,7 +421,8 @@ func TestVtimeCacheEvictedEntryRetry(t *testing.T) {
 }
 
 // TestVtimeCacheReconcileRace runs concurrent reserve+commit on two
-// timelines against a walk loop. A seed hook that returns the durable
+// timelines against a walk loop that refreshes both partitions' LWM before
+// each walk. A seed hook that returns the durable
 // maximum must keep each timeline's stamps contiguous however walks
 // interleave with reservations.
 func TestVtimeCacheReconcileRace(t *testing.T) {
@@ -443,6 +444,11 @@ func TestVtimeCacheReconcileRace(t *testing.T) {
 		defer mu.Unlock()
 		seedCalls[partition]++
 		return durable[partition], nil
+	}
+	// A zero floor keeps the expected stamps at {1..200}*stride while still
+	// exercising the cold-seed and reconcile refresh paths concurrently.
+	c.lwmHook = func(context.Context, string) (int64, bool, error) {
+		return 0, true, nil
 	}
 
 	var wg sync.WaitGroup
@@ -486,6 +492,11 @@ func TestVtimeCacheReconcileRace(t *testing.T) {
 				walked <- st
 				return
 			default:
+				for _, p := range partitions {
+					if err := c.refreshLWM(context.Background(), p); err != nil {
+						t.Errorf("refreshLWM(%q): %v", p, err)
+					}
+				}
 				before := snapshot()
 				c.invalidateAndEvict()
 				after := snapshot()
@@ -529,5 +540,211 @@ func TestVtimeCacheReconcileRace(t *testing.T) {
 		reseeds := seedCalls[p] - 1
 		t.Logf("partition %s: seed calls=%d evictions=%d invalidation re-seeds~=%d",
 			p, seedCalls[p], ws.evictions[p], reseeds-ws.evictions[p])
+	}
+}
+
+// lwmCalls is a fake lwmHook that records calls per partition and returns a
+// fixed frontier.
+type lwmCalls struct {
+	lwm   int64
+	calls map[string]int
+}
+
+func (f *lwmCalls) hook(_ context.Context, partition string) (lwm int64, ok bool, err error) {
+	if f.calls == nil {
+		f.calls = map[string]int{}
+	}
+	f.calls[partition]++
+	return f.lwm, true, nil
+}
+
+// TestVtimeCacheColdSeedRefreshesLWM verifies that every cold seed (an
+// entry's first) refreshes its partition's frontier, while a re-seed after a
+// walk uses the stored LWM without querying.
+func TestVtimeCacheColdSeedRefreshesLWM(t *testing.T) {
+	ctx := context.Background()
+	lwm := &lwmCalls{}
+	c := newVtimeCache()
+	c.lwmHook = lwm.hook
+
+	reserveCommit := func(tenant, partition string) {
+		t.Helper()
+		r, err := c.reserve(ctx, tenant, partition, 1, 1)
+		if err != nil {
+			t.Fatalf("reserve(%q, %q): %v", tenant, partition, err)
+		}
+		r.Commit()
+	}
+
+	reserveCommit("a", "p1")
+	if got := lwm.calls["p1"]; got != 1 {
+		t.Fatalf("after cold seed (a, p1): lwmHook(p1) calls = %d, want 1", got)
+	}
+	reserveCommit("a", "p1")
+	if got := lwm.calls["p1"]; got != 1 {
+		t.Fatalf("after seeded reserve (a, p1): lwmHook(p1) calls = %d, want 1", got)
+	}
+	reserveCommit("b", "p1")
+	if got := lwm.calls["p1"]; got != 2 {
+		t.Fatalf("after cold seed (b, p1): lwmHook(p1) calls = %d, want 2", got)
+	}
+	reserveCommit("a", "p2")
+	if got := lwm.calls["p2"]; got != 1 {
+		t.Fatalf("after cold seed (a, p2): lwmHook(p2) calls = %d, want 1", got)
+	}
+
+	c.invalidateAndEvict()
+	reserveCommit("a", "p1")
+	if got := lwm.calls["p1"]; got != 2 {
+		t.Errorf("after re-seed (a, p1): lwmHook(p1) calls = %d, want 2 (re-seed must not query)", got)
+	}
+}
+
+// TestVtimeCacheColdSeedLWMErrorRetries verifies that a cold seed whose
+// frontier refresh fails also fails the reserve and leaves the entry unseeded, so
+// the next reserve retries the refresh and the seed.
+func TestVtimeCacheColdSeedLWMErrorRetries(t *testing.T) {
+	const lwm = int64(10 * scale)
+	ctx := context.Background()
+	lwmCalls, seedCalls := 0, 0
+	c := newVtimeCache()
+	c.lwmHook = func(context.Context, string) (int64, bool, error) {
+		lwmCalls++
+		if lwmCalls == 1 {
+			return 0, false, errors.New("transient frontier failure")
+		}
+		return lwm, true, nil
+	}
+	c.seedHook = func(context.Context, string, string) (int64, error) {
+		seedCalls++
+		return 0, nil
+	}
+
+	if _, err := c.reserve(ctx, "tenant-a", defaultPartition, 1, 1); err == nil {
+		t.Fatal("reserve with failing lwmHook: got nil error, want failure")
+	}
+	if seedCalls != 0 {
+		t.Errorf("seed hook calls after failed refresh = %d, want 0", seedCalls)
+	}
+
+	r, err := c.reserve(ctx, "tenant-a", defaultPartition, 1, 1)
+	if err != nil {
+		t.Fatalf("reserve after refresh retry: %v", err)
+	}
+	defer r.Abort()
+	if want := lwm + stride(1, 1); r.vstamp != want {
+		t.Errorf("vstamp = %d, want %d", r.vstamp, want)
+	}
+	if lwmCalls != 2 {
+		t.Errorf("lwmHook calls = %d, want 2 (one failure, one retry)", lwmCalls)
+	}
+}
+
+// TestVtimeCacheLWMTracksFrontier verifies the stored LWM is the last
+// computed frontier with no monotone hold: it follows a dip, and a refresh
+// that finds no visible job keeps the prior value.
+func TestVtimeCacheLWMTracksFrontier(t *testing.T) {
+	type result struct {
+		lwm int64
+		ok  bool
+	}
+	results := []result{{10 * scale, true}, {6 * scale, true}, {0, false}}
+	want := []int64{10 * scale, 6 * scale, 6 * scale}
+
+	i := 0
+	c := newVtimeCache()
+	c.lwmHook = func(context.Context, string) (int64, bool, error) {
+		r := results[i]
+		i++
+		return r.lwm, r.ok, nil
+	}
+
+	for n, w := range want {
+		if err := c.refreshLWM(context.Background(), "p"); err != nil {
+			t.Fatalf("refresh %d: %v", n, err)
+		}
+		if got := c.lwmFor("p"); got != w {
+			t.Errorf("after refresh %d: lwmFor = %d, want %d", n, got, w)
+		}
+	}
+}
+
+// TestVtimeCacheSeedTakesMax verifies a seed takes max(trailing edge, LWM).
+func TestVtimeCacheSeedTakesMax(t *testing.T) {
+	const lwm = int64(10 * scale)
+	cases := []struct {
+		name string
+		edge int64
+		want int64
+	}{
+		{"edge below floor", 3 * scale, lwm + stride(1, 1)},
+		{"edge above floor", 12 * scale, 12*scale + stride(1, 1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newVtimeCache()
+			c.lwmHook = (&lwmCalls{lwm: lwm}).hook
+			c.seedHook = func(context.Context, string, string) (int64, error) {
+				return tc.edge, nil
+			}
+			r := mustReserve(t, c, "tenant-a", 1, 1)
+			defer r.Abort()
+			if r.vstamp != tc.want {
+				t.Errorf("first vstamp = %d, want %d", r.vstamp, tc.want)
+			}
+		})
+	}
+}
+
+// TestReconcileFailedRefreshLeavesCacheUntouched verifies that a reconcile
+// whose LWM refresh fails for one of two partitions skips the walk: a
+// touched entry stays seeded, touched, and not stale. The Queue has only a
+// cache with fake hooks; reconcile touches nothing else, so no database is
+// needed.
+func TestReconcileFailedRefreshLeavesCacheUntouched(t *testing.T) {
+	ctx := context.Background()
+	failing := false
+	c := newVtimeCache()
+	c.lwmHook = func(_ context.Context, partition string) (int64, bool, error) {
+		if failing && partition == "p2" {
+			return 0, false, errors.New("frontier failure")
+		}
+		return 0, true, nil
+	}
+	q := &Queue{vtimes: c}
+
+	for _, p := range []string{"p1", "p2"} {
+		r, err := c.reserve(ctx, "tenant-a", p, 1, 1)
+		if err != nil {
+			t.Fatalf("reserve(%q): %v", p, err)
+		}
+		r.Commit()
+	}
+
+	failing = true
+	if err := q.reconcile(ctx); err == nil {
+		t.Fatal("reconcile with failing lwmHook: got nil error, want failure")
+	}
+
+	for _, p := range []string{"p1", "p2"} {
+		key := timelineKey{tenant: "tenant-a", partition: p}
+		c.mu.Lock()
+		tl, ok := c.tenants[key]
+		c.mu.Unlock()
+		if !ok {
+			t.Fatalf("timeline %v evicted by failed reconcile", key)
+		}
+		if !tl.touched.Load() {
+			t.Errorf("timeline %v: touched cleared by failed reconcile", key)
+		}
+		if tl.stale.Load() {
+			t.Errorf("timeline %v: marked stale by failed reconcile", key)
+		}
+		tl.mu.Lock()
+		seeded := tl.seeded
+		tl.mu.Unlock()
+		if !seeded {
+			t.Errorf("timeline %v: unseeded by failed reconcile", key)
+		}
 	}
 }

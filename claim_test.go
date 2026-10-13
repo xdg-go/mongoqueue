@@ -120,15 +120,20 @@ func TestClaimOrdersByVStampThenID(t *testing.T) {
 	ctx := opCtx(t)
 	q := New(db.Collection("jobs"))
 
+	// Fixtures are inserted at fixed vstamps: this test is about claim
+	// ordering, not stamping (enqueue would floor the later tenants to
+	// a-costly's frontier).
+	insert := func(id, tenant string, vstamp int64) {
+		insertJob(ctx, t, q, Job{ID: id, TenantID: tenant, Partition: defaultPartition, Liveness: LivenessPending, VStamp: vstamp})
+	}
 	// Lower vstamp, larger id.
-	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "a-costly", TenantID: "t1", Cost: 10})
-	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "z-cheap", TenantID: "t2", Cost: 1})
-	// Equal vstamps (first job, cost 1, weight 1) on fresh tenants; the
-	// larger id is enqueued first.
-	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "tie-b", TenantID: "t3", Cost: 1})
-	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "tie-a", TenantID: "t4", Cost: 1})
+	insert("a-costly", "t1", 10*scale)
+	insert("z-cheap", "t2", scale)
+	// Equal vstamps on different tenants; the larger id is inserted first.
+	insert("tie-b", "t3", scale)
+	insert("tie-a", "t4", scale)
 
-	// z-cheap and both ties share vstamp stride(1,1); _id orders them.
+	// z-cheap and both ties share vstamp 1e6; _id orders them.
 	// Guard the premise so the tie-break cannot pass vacuously.
 	tieA, tieB, cheap := findJob(ctx, t, q, "tie-a"), findJob(ctx, t, q, "tie-b"), findJob(ctx, t, q, "z-cheap")
 	if tieA.VStamp != tieB.VStamp || tieA.VStamp != cheap.VStamp {
