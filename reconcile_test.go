@@ -56,13 +56,13 @@ func TestReconcileRefundsTrailingCancellation(t *testing.T) {
 	enqueueTenant(ctx, t, q, 3, EnqueueOpts{TenantID: "b", Partition: "pb", Cost: 1, Weight: 1})
 	mustCancel(ctx, t, q, "b-002")
 	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "b-003", TenantID: "b", Partition: "pb", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q, "b-003", 4_000_000)
+	assertVStamp(ctx, t, q, "b-003", 4*scale)
 
 	enqueueTenant(ctx, t, q, 3, EnqueueOpts{TenantID: "a", Partition: "pa", Cost: 1, Weight: 1})
 	mustCancel(ctx, t, q, "a-002")
 	mustReconcile(ctx, t, q)
 	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "a-003", TenantID: "a", Partition: "pa", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q, "a-003", 3_000_000)
+	assertVStamp(ctx, t, q, "a-003", 3*scale)
 }
 
 // TestReconcileCorrectsExternalWriterDrift proves reconcile picks up a stamp
@@ -75,20 +75,20 @@ func TestReconcileCorrectsExternalWriterDrift(t *testing.T) {
 	q := New(db.Collection("jobs"))
 
 	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "a-000", TenantID: "a", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q, "a-000", 1_000_000)
+	assertVStamp(ctx, t, q, "a-000", scale)
 
 	insertJob(ctx, t, q, Job{
 		ID: "ext-default", TenantID: "a", Partition: defaultPartition, Cost: 1,
-		VStamp: 50_000_000, Liveness: LivenessPending, VisibleAt: time.Now(),
+		VStamp: 50 * scale, Liveness: LivenessPending, VisibleAt: time.Now(),
 	})
 	insertJob(ctx, t, q, Job{
 		ID: "ext-other", TenantID: "a", Partition: "other", Cost: 1,
-		VStamp: 90_000_000, Liveness: LivenessPending, VisibleAt: time.Now(),
+		VStamp: 90 * scale, Liveness: LivenessPending, VisibleAt: time.Now(),
 	})
 	mustReconcile(ctx, t, q)
 
 	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "a-001", TenantID: "a", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q, "a-001", 51_000_000)
+	assertVStamp(ctx, t, q, "a-001", 51*scale)
 }
 
 // TestReconcileEvictsIdleTimeline proves a timeline with no enqueue between
@@ -169,17 +169,17 @@ func jobIDs(prefix string, from, to int) []string {
 	return ids
 }
 
-// setupIdleReturn drains tenant a (cached vtime 3e6), then stamps b-000..b-019
-// at 1e6..20e6 (its cold seed sees no visible job) and drains b-000..b-009,
-// leaving the default partition's frontier at 11e6, then reconciles.
+// setupIdleReturn drains tenant a (cached vtime 3e3), then stamps b-000..b-019
+// at 1e3..20e3 (its cold seed finds no frontier) and drains b-000..b-009,
+// leaving the default partition's frontier at 11e3, then reconciles.
 func setupIdleReturn(ctx context.Context, t *testing.T, q *Queue) {
 	t.Helper()
 	enqueueTenant(ctx, t, q, 3, EnqueueOpts{TenantID: "a", Cost: 1, Weight: 1})
 	claimComplete(ctx, t, q, "", jobIDs("a", 0, 3)...)
 
 	enqueueTenant(ctx, t, q, 20, EnqueueOpts{TenantID: "b", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q, "b-000", 1_000_000)
-	assertVStamp(ctx, t, q, "b-019", 20_000_000)
+	assertVStamp(ctx, t, q, "b-000", scale)
+	assertVStamp(ctx, t, q, "b-019", 20*scale)
 	claimComplete(ctx, t, q, "", jobIDs("b", 0, 10)...)
 
 	mustReconcile(ctx, t, q)
@@ -187,8 +187,8 @@ func setupIdleReturn(ctx context.Context, t *testing.T, q *Queue) {
 
 // TestLWMIdleTenantResumesAtFrontier proves a returning tenant is floored to
 // the partition's dispatch frontier: no credit for idle time (stale vtime
-// would stamp a-003 at 4e6) and no burial behind the backlog (a trailing-edge
-// floor would stamp it at 21e6).
+// would stamp a-003 at 4e3) and no burial behind the backlog (a trailing-edge
+// floor would stamp it at 21e3).
 func TestLWMIdleTenantResumesAtFrontier(t *testing.T) {
 	t.Parallel()
 
@@ -199,9 +199,9 @@ func TestLWMIdleTenantResumesAtFrontier(t *testing.T) {
 	setupIdleReturn(ctx, t, q)
 
 	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "a-003", TenantID: "a", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q, "a-003", 12_000_000)
+	assertVStamp(ctx, t, q, "a-003", 12*scale)
 
-	// a-003 ties b-011 at 12e6 and wins on id.
+	// a-003 ties b-011 at 12e3 and wins on id.
 	want := append([]string{"b-010", "a-003"}, jobIDs("b", 11, 20)...)
 	assertOrder(t, drainOrder(ctx, t, q, ""), want)
 }
@@ -221,8 +221,8 @@ func TestLWMReturningTenantFloodsAtShare(t *testing.T) {
 	for i := 3; i < 23; i++ {
 		enqueueJob(ctx, t, q, EnqueueOpts{JobID: fmt.Sprintf("a-%03d", i), TenantID: "a", Cost: 1, Weight: 1})
 	}
-	assertVStamp(ctx, t, q, "a-003", 12_000_000)
-	assertVStamp(ctx, t, q, "a-022", 31_000_000)
+	assertVStamp(ctx, t, q, "a-003", 12*scale)
+	assertVStamp(ctx, t, q, "a-022", 31*scale)
 
 	want := []string{"b-010"}
 	for i := range 9 {
@@ -247,12 +247,69 @@ func TestLWMColdNodeFloorsNewTenant(t *testing.T) {
 
 	q2 := New(db.Collection("jobs"))
 	enqueueJob(ctx, t, q2, EnqueueOpts{JobID: "c-000", TenantID: "c", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q2, "c-000", 12_000_000)
+	assertVStamp(ctx, t, q2, "c-000", 12*scale)
+}
+
+// claimN claims n jobs in partition and leaves them leased.
+func claimN(ctx context.Context, t *testing.T, q *Queue, partition string, n int) {
+	t.Helper()
+	for range n {
+		mustClaim(ctx, t, q, partition)
+	}
+}
+
+// TestLWMColdNodeAllLeasedFloorsAtLastDispatch proves a cold seed in a
+// partition with nothing visible floors a new tenant at the most recently
+// dispatched vstamp. Every b job is leased, so the visible frontier is empty;
+// without the leased fallback c would start at 0 and be stamped 1e3, ahead
+// of all b's future work.
+func TestLWMColdNodeAllLeasedFloorsAtLastDispatch(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+
+	q1 := New(db.Collection("jobs"))
+	enqueueTenant(ctx, t, q1, 20, EnqueueOpts{TenantID: "b", Cost: 1, Weight: 1})
+	claimN(ctx, t, q1, "", 20)
+
+	q2 := New(db.Collection("jobs"))
+	enqueueJob(ctx, t, q2, EnqueueOpts{JobID: "c-000", TenantID: "c", Cost: 1, Weight: 1})
+	assertVStamp(ctx, t, q2, "c-000", 21*scale)
+}
+
+// TestLWMWarmNodeAllLeasedTracksDispatch proves a reconcile that finds
+// nothing visible still advances the stored frontier to the most recently
+// dispatched vstamp. Tenant a stays cached (touched between reconciles), so
+// its last enqueue re-seeds from the stored frontier rather than refreshing
+// it; keeping the frontier from before the partition went fully leased
+// (11e3) would stamp a-002 at 13e3.
+func TestLWMWarmNodeAllLeasedTracksDispatch(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	q := New(db.Collection("jobs"))
+
+	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "a-000", TenantID: "a", Partition: "p", Cost: 1, Weight: 1})
+	claimComplete(ctx, t, q, "p", "a-000")
+	enqueueTenant(ctx, t, q, 20, EnqueueOpts{TenantID: "b", Partition: "p", Cost: 1, Weight: 1})
+	assertVStamp(ctx, t, q, "b-019", 20*scale)
+	claimN(ctx, t, q, "p", 10)
+	mustReconcile(ctx, t, q) // visible frontier: b-010 at 11e3
+
+	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "a-001", TenantID: "a", Partition: "p", Cost: 1, Weight: 1})
+	assertVStamp(ctx, t, q, "a-001", 12*scale)
+	claimN(ctx, t, q, "p", 11)
+	mustReconcile(ctx, t, q) // nothing visible; last dispatch b-019 at 20e3
+
+	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "a-002", TenantID: "a", Partition: "p", Cost: 1, Weight: 1})
+	assertVStamp(ctx, t, q, "a-002", 21*scale)
 }
 
 // TestLWMLanesAreIndependent proves each partition floors against its own
 // frontier: a tenant's position in one lane does not move it in another (a
-// shared timeline would have stamped c's slow job at 13e6).
+// shared timeline would have stamped c's slow job at 13e3).
 func TestLWMLanesAreIndependent(t *testing.T) {
 	t.Parallel()
 
@@ -267,14 +324,14 @@ func TestLWMLanesAreIndependent(t *testing.T) {
 	claimComplete(ctx, t, q, "fast", jobIDs("b-fast", 0, 10)...)
 
 	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "c-fast", TenantID: "c", Partition: "fast", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q, "c-fast", 12_000_000)
+	assertVStamp(ctx, t, q, "c-fast", 12*scale)
 	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "c-slow", TenantID: "c", Partition: "slow", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q, "c-slow", 2_000_000)
+	assertVStamp(ctx, t, q, "c-slow", 2*scale)
 }
 
 // TestLWMOtherLanePendingDoesNotRefund proves a re-seed reads only its own
 // lane's trailing edge: a's pending slow-lane job does not pull its fast-lane
-// timeline back (a shared timeline would re-seed to 1e6 and stamp a-f01 2e6).
+// timeline back (a shared timeline would re-seed to 1e3 and stamp a-f01 2e3).
 func TestLWMOtherLanePendingDoesNotRefund(t *testing.T) {
 	t.Parallel()
 
@@ -285,20 +342,20 @@ func TestLWMOtherLanePendingDoesNotRefund(t *testing.T) {
 	for i := 10; i < 20; i++ {
 		insertJob(ctx, t, q, Job{
 			ID: fmt.Sprintf("b-%03d", i), TenantID: "b", Partition: "fast", Cost: 1,
-			VStamp: int64(i+1) * 1_000_000, Liveness: LivenessPending, VisibleAt: time.Now(),
+			VStamp: int64(i+1) * scale, Liveness: LivenessPending, VisibleAt: time.Now(),
 		})
 	}
 
 	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "a-slow", TenantID: "a", Partition: "slow", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q, "a-slow", 1_000_000)
+	assertVStamp(ctx, t, q, "a-slow", scale)
 	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "a-f00", TenantID: "a", Partition: "fast", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q, "a-f00", 12_000_000)
+	assertVStamp(ctx, t, q, "a-f00", 12*scale)
 
 	claimComplete(ctx, t, q, "fast", "b-010", "a-f00")
 	mustReconcile(ctx, t, q)
 
 	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "a-f01", TenantID: "a", Partition: "fast", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q, "a-f01", 13_000_000)
+	assertVStamp(ctx, t, q, "a-f01", 13*scale)
 
 	want := append([]string{"b-011", "a-f01"}, jobIDs("b", 12, 20)...)
 	assertOrder(t, drainOrder(ctx, t, q, "fast"), want)
@@ -307,7 +364,7 @@ func TestLWMOtherLanePendingDoesNotRefund(t *testing.T) {
 // TestReconcileConcurrent runs Reconcile in a loop on several goroutines while
 // two producers enqueue for one tenant in one partition. Under -race this
 // checks Reconcile is safe alongside itself and enqueue, and that the tenant's
-// stamps stay exactly {1..N}x1e6 with no gap or duplicate. Each producer
+// stamps stay exactly {1..N}x1e3 with no gap or duplicate. Each producer
 // waits after every enqueue until at least one Reconcile has started and
 // finished since, so every stamp after the first is a re-seed and the overlap
 // is guaranteed rather than left to the scheduler.
@@ -385,7 +442,7 @@ func TestReconcileConcurrent(t *testing.T) {
 	}
 	slices.Sort(got)
 	for i, v := range got {
-		if want := int64(i+1) * 1_000_000; v != want {
+		if want := int64(i+1) * scale; v != want {
 			t.Fatalf("sorted vstamps[%d] = %d, want %d (all: %v)", i, v, want, got)
 		}
 	}

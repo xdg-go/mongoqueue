@@ -2,6 +2,7 @@ package mongoqueue
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 )
@@ -61,9 +62,9 @@ type vtimeCache struct {
 	seedHook func(ctx context.Context, tenant, partition string) (int64, error)
 
 	// lwmHook, when non-nil, returns a partition's dispatch frontier (its
-	// low-water mark, LWM): the vstamp the next claim there would take. ok is
-	// false when the partition has no visible pending job. Queue wires it to
-	// computeLWM. Nil means the LWM is always 0. Every seed takes
+	// low-water mark, LWM): the vstamp the next claim there would take, or
+	// with nothing visible the highest leased vstamp. ok is false when the
+	// partition has no frontier. Queue wires it to computeLWM. Nil means the LWM is always 0. Every seed takes
 	// max(trailing edge, LWM), so a new, evicted, or returning timeline joins
 	// at the point of service rather than claiming credit for idle time.
 	lwmHook func(ctx context.Context, partition string) (lwm int64, ok bool, err error)
@@ -113,7 +114,7 @@ func newVtimeCache() *vtimeCache {
 
 // refreshLWM recomputes partition's frontier with lwmHook and stores it. The
 // stored value tracks the frontier, dips included (plain overwrite, no max);
-// a computation that finds no visible job (ok false) leaves the prior value.
+// a computation that finds no frontier (ok false) leaves the prior value.
 // A hook error is returned and nothing is stored. The hook runs without
 // lwmMu held, so a late refresh may overwrite a newer value with an older one
 // (an accepted, bounded dip), or re-store a value a walk just pruned; the
@@ -175,16 +176,18 @@ type vtimeReservation struct {
 // re-enqueue that inserted nothing must advance nothing).
 //
 // cost and weight must already be normalized (see normalizeCost and
-// normalizeWeight); reserve applies stride directly.
+// normalizeWeight).
 //
 // A seed sets vtime to max(trailing edge, lwmFor(partition)). A cold seed
 // (the entry's first) refreshes the partition's LWM first; a re-seed after
 // reconcile uses the LWM reconcile stored.
 //
-// reserve fails only when the seed hook or the cold seed's LWM refresh
-// fails; the timeline's lock is released and the timeline stays unseeded, so
-// a later reserve retries the seed. ctx bounds only those queries and is
-// unused after a timeline is seeded.
+// reserve fails when the seed hook or the cold seed's LWM refresh fails;
+// the timeline's lock is released and the timeline stays unseeded, so a
+// later reserve retries the seed. ctx bounds only those queries and is
+// unused after a timeline is seeded. It also fails with ErrVTimeOverflow
+// when the candidate would exceed int64 (see nextVStamp); the lock is
+// released and vtime is unchanged.
 func (c *vtimeCache) reserve(ctx context.Context, tenant, partition string, cost, weight int64) (*vtimeReservation, error) {
 	t := c.lockTimeline(timelineKey{tenant: tenant, partition: partition})
 	t.touched.Store(true)
@@ -197,7 +200,12 @@ func (c *vtimeCache) reserve(ctx context.Context, tenant, partition string, cost
 			return nil, err
 		}
 	}
-	return &vtimeReservation{tenant: t, vstamp: t.vtime + stride(cost, weight)}, nil
+	vstamp, err := nextVStamp(t.vtime, cost, weight)
+	if err != nil {
+		t.mu.Unlock()
+		return nil, fmt.Errorf("mongoqueue: stamp tenant %q partition %q: %w", tenant, partition, err)
+	}
+	return &vtimeReservation{tenant: t, vstamp: vstamp}, nil
 }
 
 // seed sets t's vtime to max(trailing edge, LWM) and marks it seeded. The

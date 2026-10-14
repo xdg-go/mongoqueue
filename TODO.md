@@ -635,6 +635,28 @@ seed is still `max pending or 0`.
   leased or delayed jobs keeps the prior LWM so new tenants sit above
   them, and a partition's LWM is dropped with its last cached timeline
 
+## 6.5 Review Follow-ups (decided 2026-10-13)
+
+- [x] Frontier leased fallback: when no job is visible, `computeLWM` takes
+  the max vstamp among leased jobs (`claim_id` > `""`). Supersedes the
+  6.4 decision to keep the prior LWM when only leased or delayed jobs
+  remain: a retained value ages without bound in a fully leased partition
+  and is 0 on a cold node, granting newcomers unbounded idle credit.
+  `claim_id` appended to the claim index so the fallback is covered
+- [x] **Test**: `TestComputeLWM` fallback cases (leased max; delayed,
+  released, resolved skipped; delayed-only partition has none);
+  cold-node and warm-node all-leased placement tests; both fail without
+  the fallback. Explain check recorded in the mongodb doc
+- [x] SCALE 1e6 -> 1e3 and checked stamp arithmetic: the 1e6 overflow
+  bound was off by 10^6 (107 days, not 292,000 years, at 10^6
+  cost-units/s). `nextVStamp` returns `ErrVTimeOverflow` instead of
+  wrapping; tests use `scale` rather than literals
+- [x] `Reconcile` attempts every partition, joins failures, and always
+  walks (one failing partition no longer stalls marking and eviction);
+  stops refreshing once ctx is done
+- [ ] Deferred: channel-gated test forcing a late refresh across a prune
+  and a recreated timeline (pins the accepted bounded dip)
+
 ---
 
 ## Future Phases (Deferred)

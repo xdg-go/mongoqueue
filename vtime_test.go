@@ -21,21 +21,21 @@ func TestStride(t *testing.T) {
 		want   int64
 	}{
 		// Typical ratios.
-		{"unit cost, unit weight", 1, 1, 1_000_000},
-		{"cost 5, weight 2", 5, 2, 2_500_000},
-		{"cost 10, weight 3 truncates", 10, 3, 3_333_333},
-		{"cost 2, weight 3 truncates", 2, 3, 666_666},
-		{"cost 100, weight 7 truncates", 100, 7, 14_285_714},
+		{"unit cost, unit weight", 1, 1, 1_000},
+		{"cost 5, weight 2", 5, 2, 2_500},
+		{"cost 10, weight 3 truncates", 10, 3, 3_333},
+		{"cost 2, weight 3 truncates", 2, 3, 666},
+		{"cost 100, weight 7 truncates", 100, 7, 14_285},
 
 		// Extreme ratios.
-		{"huge cost, weight 1", 9_000_000_000_000, 1, 9_000_000_000_000_000_000},
+		{"max cost, weight 1", 9_223_372_036_854_775, 1, 9_223_372_036_854_775_000},
 		{"cost 1, huge weight floors", 1, 2_000_000, 1},
 		{"cost 3, weight far above cost*scale floors", 3, 5_000_000, 1},
 
 		// Floor boundary: quotient exactly 1, then just below and above.
-		{"quotient exactly 1", 1, 1_000_000, 1},
-		{"quotient just above 1 truncates to 1", 1, 999_999, 1},
-		{"quotient 0 floors to 1", 1, 1_000_001, 1},
+		{"quotient exactly 1", 1, 1_000, 1},
+		{"quotient just above 1 truncates to 1", 1, 999, 1},
+		{"quotient 0 floors to 1", 1, 1_001, 1},
 	}
 
 	for _, tc := range cases {
@@ -43,6 +43,47 @@ func TestStride(t *testing.T) {
 			t.Parallel()
 			if got := stride(tc.cost, tc.weight); got != tc.want {
 				t.Errorf("stride(%d, %d) = %d, want %d", tc.cost, tc.weight, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNextVStamp checks the overflow guard at its two boundaries: cost*scale
+// and vtime + stride, each at the last value that fits and the first that
+// does not.
+func TestNextVStamp(t *testing.T) {
+	t.Parallel()
+
+	const maxInt64 = 9_223_372_036_854_775_807
+	cases := []struct {
+		name         string
+		vtime, cost  int64
+		weight       int64
+		want         int64
+		wantOverflow bool
+	}{
+		{"ordinary", 5_000, 1, 1, 6_000, false},
+		{"max cost fits", 0, 9_223_372_036_854_775, 1, 9_223_372_036_854_775_000, false},
+		{"cost past max overflows", 0, 9_223_372_036_854_776, 1, 0, true},
+		{"sum reaches MaxInt64", maxInt64 - 1_000, 1, 1, maxInt64, false},
+		{"sum past MaxInt64 overflows", maxInt64 - 999, 1, 1, 0, true},
+		{"floored stride at MaxInt64 overflows", maxInt64, 1, 2_000, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := nextVStamp(tc.vtime, tc.cost, tc.weight)
+			if tc.wantOverflow {
+				if !errors.Is(err, ErrVTimeOverflow) {
+					t.Fatalf("nextVStamp(%d, %d, %d) err = %v, want ErrVTimeOverflow", tc.vtime, tc.cost, tc.weight, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("nextVStamp(%d, %d, %d) err = %v", tc.vtime, tc.cost, tc.weight, err)
+			}
+			if got != tc.want {
+				t.Errorf("nextVStamp(%d, %d, %d) = %d, want %d", tc.vtime, tc.cost, tc.weight, got, tc.want)
 			}
 		})
 	}

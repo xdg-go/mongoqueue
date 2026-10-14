@@ -109,6 +109,7 @@ func TestEnsureIndexesCreatesClaimAndSeedIndexes(t *testing.T) {
 			{Key: "vstamp", Value: int32(1)},
 			{Key: "_id", Value: int32(1)},
 			{Key: "visible_at", Value: int32(1)},
+			{Key: "claim_id", Value: int32(1)},
 		},
 		"seed": {
 			{Key: "tenant", Value: int32(1)},
@@ -283,7 +284,9 @@ func TestColdStartSeed(t *testing.T) {
 
 // TestComputeLWM proves the frontier is the minimum vstamp in the claim's
 // visible set: leased, delayed, and resolved jobs below it are skipped, and
-// other partitions are ignored.
+// other partitions are ignored. With nothing visible it falls back to the
+// maximum leased vstamp, skipping delayed, released, and resolved jobs above
+// it; a partition with only delayed jobs has no frontier.
 func TestComputeLWM(t *testing.T) {
 	t.Parallel()
 
@@ -305,6 +308,21 @@ func TestComputeLWM(t *testing.T) {
 	})
 	insertJob(ctx, t, q, Job{ID: "other", Partition: "p2", Liveness: LivenessPending, VStamp: 1 * scale, VisibleAt: past})
 
+	// p3: nothing visible. Leased at 3 and 5; above them a delayed job, a
+	// released job (claim_id cleared), and a resolved job that kept its fence.
+	future := time.Now().Add(time.Hour)
+	for _, j := range []Job{
+		{ID: "p3-leased-3", VStamp: 3 * scale, ClaimID: "fence-3", Liveness: LivenessPending},
+		{ID: "p3-leased-5", VStamp: 5 * scale, ClaimID: "fence-5", Liveness: LivenessPending},
+		{ID: "p3-delayed-9", VStamp: 9 * scale, Liveness: LivenessPending},
+		{ID: "p3-released-8", VStamp: 8 * scale, Liveness: LivenessPending, Attempts: 1},
+		{ID: "p3-canceled-7", VStamp: 7 * scale, ClaimID: "fence-7", Liveness: LivenessResolved, Resolution: ResolutionCanceled, ResolvedAt: past},
+	} {
+		j.Partition, j.VisibleAt = "p3", future
+		insertJob(ctx, t, q, j)
+	}
+	insertJob(ctx, t, q, Job{ID: "p4-delayed", Partition: "p4", Liveness: LivenessPending, VStamp: 2 * scale, VisibleAt: future})
+
 	for _, tc := range []struct {
 		partition string
 		wantLWM   int64
@@ -312,6 +330,8 @@ func TestComputeLWM(t *testing.T) {
 	}{
 		{"p1", 4 * scale, true},
 		{"p2", 1 * scale, true},
+		{"p3", 5 * scale, true},
+		{"p4", 0, false},
 		{"empty", 0, false},
 	} {
 		lwm, ok, err := q.computeLWM(ctx, tc.partition)

@@ -114,8 +114,10 @@ everything downstream.
   decided; `body` stores as a native subdocument queryable by field
 
 ### 2.2 Fixed-point virtual time
-- Stride function: `max(1, cost*SCALE/weight)`, `SCALE = 1_000_000`;
-  cost floor; weight zero-means-1 and `>= 1` validation
+- Stride function: `max(1, cost*SCALE/weight)`, `SCALE = 1_000` (was
+  `1_000_000` until Phase 6 review; see the design doc's SCALE trade-off);
+  cost floor; weight zero-means-1 and `>= 1` validation; checked stamp
+  arithmetic (`ErrVTimeOverflow`)
 - **Test**: table-driven stride cases -- extreme cost/weight ratios,
   floor behavior, strictly-increasing-within-tenant property
 

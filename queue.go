@@ -129,29 +129,61 @@ func (q *Queue) seedTenantVtime(ctx context.Context, tenant, partition string) (
 	return doc.VStamp, nil
 }
 
-// computeLWM returns partition's dispatch frontier (its low-water mark): the
-// vstamp the next claim would take, found with the claim filter and sort.
-// ok is false when the partition has no visible pending job.
+// computeLWM returns partition's dispatch frontier (its low-water mark).
+// While the partition has a visible pending job, the frontier is the vstamp
+// the next claim would take, found with the claim filter and sort. When none
+// is visible, it falls back to the vstamp most recently put into service: the
+// maximum vstamp among leased jobs. ok is false when the partition has
+// neither (it is empty or holds only delayed jobs).
 //
 // Visibility filtering matters: a leased or delayed job is not dispatchable
-// now, so it must not pin the floor below the point of service.
+// now, so it must not pin the floor below the point of service. The fallback
+// matters because a partition whose workers keep up has no visible job most
+// of the time; keeping an old frontier there would hand every newcomer all
+// the virtual time served since it was computed. Delayed and released jobs
+// carry an empty claim_id and are excluded from the fallback: they are not in
+// service.
 //
-// The read goes to the primary, like the seed query, and is served by the
-// claim index.
+// Both reads go to the primary, like the seed query, and are served by the
+// claim index; the fallback runs only when the first read finds nothing.
 func (q *Queue) computeLWM(ctx context.Context, partition string) (lwm int64, ok bool, err error) {
+	lwm, ok, err = q.firstVStamp(ctx, claimFilter(partition), claimSort())
+	if err == nil && !ok {
+		lwm, ok, err = q.firstVStamp(ctx, leasedFilter(partition), bson.D{{Key: "vstamp", Value: -1}, {Key: "_id", Value: -1}})
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("mongoqueue: compute frontier for partition %q: %w", partition, err)
+	}
+	return lwm, ok, nil
+}
+
+// leasedFilter selects partition's leased jobs: pending with a claim fence.
+// Released and never-claimed jobs store an empty claim_id; $gt "" also skips
+// a missing field.
+func leasedFilter(partition string) bson.D {
+	return bson.D{
+		{Key: "partition", Value: partition},
+		{Key: "liveness", Value: LivenessPending},
+		{Key: "claim_id", Value: bson.D{{Key: "$gt", Value: ""}}},
+	}
+}
+
+// firstVStamp returns the vstamp of the first job matching filter in sort
+// order from the primary; ok is false when nothing matches.
+func (q *Queue) firstVStamp(ctx context.Context, filter, sort bson.D) (vstamp int64, ok bool, err error) {
 	opts := options.FindOne().
-		SetSort(claimSort()).
+		SetSort(sort).
 		SetProjection(bson.D{{Key: "vstamp", Value: 1}})
 
 	var doc struct {
 		VStamp int64 `bson:"vstamp"`
 	}
-	err = q.primary.FindOne(ctx, claimFilter(partition), opts).Decode(&doc)
+	err = q.primary.FindOne(ctx, filter, opts).Decode(&doc)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return 0, false, nil
 	}
 	if err != nil {
-		return 0, false, fmt.Errorf("mongoqueue: compute frontier for partition %q: %w", partition, err)
+		return 0, false, fmt.Errorf("read vstamp: %w", err)
 	}
 	return doc.VStamp, true, nil
 }
@@ -181,10 +213,13 @@ func randomHex() string {
 
 // EnsureIndexes creates the two indexes the queue's hot paths depend on.
 //
-// The claim index {partition: 1, liveness: 1, vstamp: 1, _id: 1, visible_at: 1}
-// serves dispatch: the first four keys serve the claim filter and its
-// (vstamp, _id) sort; visible_at rides in the index so the visibility
-// predicate filters in-index without fetching documents.
+// The claim index {partition: 1, liveness: 1, vstamp: 1, _id: 1,
+// visible_at: 1, claim_id: 1} serves dispatch: the first four keys serve the
+// claim filter and its (vstamp, _id) sort; visible_at rides in the index so
+// the visibility predicate filters in-index without fetching documents.
+// claim_id rides along for the frontier's leased fallback (see computeLWM);
+// every write that changes claim_id also changes visible_at or liveness, so
+// it adds no index writes.
 //
 // The seed index {tenant: 1, partition: 1, liveness: 1, vstamp: -1} serves
 // the seed query, which reads a (tenant, partition) timeline's maximum
@@ -203,6 +238,7 @@ func (q *Queue) EnsureIndexes(ctx context.Context) error {
 			{Key: "vstamp", Value: 1},
 			{Key: "_id", Value: 1},
 			{Key: "visible_at", Value: 1},
+			{Key: "claim_id", Value: 1},
 		}},
 		{Keys: bson.D{
 			{Key: "tenant", Value: 1},
@@ -259,7 +295,7 @@ func (q *Queue) EnsureTTLIndex(ctx context.Context, retention time.Duration) err
 // unused for two consecutive calls (so an idle timeline is dropped within two
 // intervals).
 //
-// After a successful call, each timeline re-seeds before its next stamp,
+// After each call, every marked timeline re-seeds before its next stamp,
 // which picks up stamps written by other producers and reclaims virtual time
 // from canceled jobs at the end of a tenant's backlog. New tenants, and
 // tenants whose timelines were evicted, are placed at the partition's
@@ -267,19 +303,30 @@ func (q *Queue) EnsureTTLIndex(ctx context.Context, retention time.Duration) err
 // refreshes that frontier itself. Drift in active timelines, however, is only
 // corrected by Reconcile.
 //
-// If ctx is done or a frontier refresh fails, Reconcile returns the error and
-// skips marking and eviction; frontiers refreshed before the error are kept.
-// Retrying on the next tick is sufficient. Reconcile is safe to call
+// Every partition's refresh is attempted; failures are joined into the
+// returned error, and the walk (marking and eviction) runs regardless, so one
+// failing partition cannot stall drift correction or eviction for the rest.
+// Marking a timeline whose partition failed to refresh is safe: its re-seed
+// uses the frontier stored by an earlier refresh. Once ctx is done the
+// remaining refreshes are skipped; a ctx already done on entry skips the walk
+// too. Retrying on the next tick is sufficient. Reconcile is safe to call
 // concurrently with itself and with all other Queue methods.
 func (q *Queue) Reconcile(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("mongoqueue: reconcile: %w", err)
 	}
+	var errs []error
 	for _, partition := range q.vtimes.partitions() {
 		if err := q.vtimes.refreshLWM(ctx, partition); err != nil {
-			return fmt.Errorf("mongoqueue: reconcile: refresh LWM for partition %q: %w", partition, err)
+			errs = append(errs, fmt.Errorf("refresh LWM for partition %q: %w", partition, err))
+			if ctx.Err() != nil {
+				break
+			}
 		}
 	}
 	q.vtimes.invalidateAndEvict()
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("mongoqueue: reconcile: %w", err)
+	}
 	return nil
 }

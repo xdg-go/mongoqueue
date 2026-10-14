@@ -104,7 +104,7 @@ type Job struct {
 ### Virtual-time arithmetic
 
 Vstamps and vtimes are fixed-point `int64` in units of 1/SCALE, `SCALE =
-1_000_000`. The stride is
+1_000`. The stride is
 
 ```go
 stride := max(1, cost*SCALE/weight)   // pure integer arithmetic
@@ -113,9 +113,12 @@ stride := max(1, cost*SCALE/weight)   // pure integer arithmetic
 Weight is `int64`, must be >= 1, and the zero value means 1 -- so the
 single-tenant / don't-care case configures nothing. The `max(1, ...)` floor
 preserves the strictly-increasing-within-tenant invariant at extreme
-cost/weight ratios; overflow is out of reach (~292,000 years at a sustained
-10^6 cost-units/sec at weight 1). Weight is an enqueue input used to compute
-the stride; it is not stored on the record.
+cost/weight ratios. Stamp arithmetic is checked: when `cost*SCALE` or
+`vtime + stride` would exceed `int64`, the enqueue fails with
+`ErrVTimeOverflow` and inserts nothing. The budget (~292 years at a sustained
+10^6 cost-units/sec at weight 1, per partition) and the SCALE trade-off are in
+the generic design doc. Weight is an enqueue input used to compute the stride;
+it is not stored on the record.
 
 ### Liveness and Resolution representation
 
@@ -238,8 +241,12 @@ the caller runs on its own ticker. There is no internal goroutine, no `Close`,
 and no interval option, so `New` stays free of I/O and goroutines. `Reconcile`
 refreshes the dispatch frontier of every partition in the cache, then walks
 the cache: an entry used since the previous call is marked stale and re-seeds
-on its next enqueue; an entry unused since then is evicted. If any frontier
-refresh fails, it returns the error and neither invalidates nor evicts. A
+on its next enqueue; an entry unused since then is evicted. A failed
+frontier refresh does not stop the others or the walk: `Reconcile` attempts
+every partition, returns the failures joined, and marks and evicts
+regardless, so one failing partition cannot stall drift correction or
+eviction for the rest. A re-seed in a partition whose refresh failed uses the
+frontier stored earlier. A context already done on entry skips everything. A
 cold seed (the first enqueue on a (tenant, partition) this node has no entry
 for) refreshes that partition's frontier itself, so new and returning tenants
 are floored correctly even on a node that never calls `Reconcile`. Without
@@ -473,10 +480,14 @@ errors pass through wrapped.
 ## Indexes, contention, and GC
 
 **Claim index:** `{partition: 1, liveness: 1, vstamp: 1, _id: 1, visible_at:
-1}`. The first four fields serve the claim filter and its `(vstamp, _id)`
-sort; `visible_at` rides in the index so the visibility predicate filters
-in-index without fetching documents. The leased low-vstamp prefix is still
-scanned past on every claim, but as index entries only.
+1, claim_id: 1}`. The first four fields serve the claim filter and its
+`(vstamp, _id)` sort; `visible_at` rides in the index so the visibility
+predicate filters in-index without fetching documents. The leased low-vstamp
+prefix is still scanned past on every claim, but as index entries only.
+`claim_id` rides along for the frontier's leased fallback (below). It adds no
+index writes: every update that changes `claim_id` (claim, release) also
+changes `visible_at`, so the entry is rewritten anyway; it only widens each
+key.
 
 **Seed index:** `{tenant: 1, partition: 1, liveness: 1, vstamp: -1}`. Serves
 the per-(tenant, partition) trailing-edge query -- the maximum pending vstamp
@@ -484,8 +495,11 @@ on one timeline -- that seeds and re-seeds the vtime cache. The claim index
 cannot serve it (it leads with `partition` and sorts `vstamp` ascending over
 all tenants). The low-water mark needs no index of its own: a partition's
 dispatch frontier is the claim filter with a `vstamp` projection, served by
-the claim index exactly as a claim is. Both reads go through the
-primary-routed collection handle (see "Lease contracts" on read concern).
+the claim index exactly as a claim is. When that finds nothing, a second read
+takes the maximum vstamp among leased jobs (`claim_id` > `""`, sorted
+`(vstamp, _id)` descending), a backward scan of the same index. All these
+reads go through the primary-routed collection handle (see "Lease contracts"
+on read concern).
 
 **Explain check (2026-10-09, MongoDB 8.2.11).** One partition seeded with
 10,000 pending jobs at low vstamps with `visible_at` a year in the future,
@@ -544,7 +558,24 @@ index, so it adds no write amplification. Its cost tracks the claim's:
 linear in the leased/delayed prefix in index keys, never in documents. An
 all-invisible partition walks its whole pending index range and fetches
 nothing. It runs once per cold seed and once per cached partition per
-`Reconcile` call.
+`Reconcile` call. (These checks predate `claim_id` joining the claim index as
+a trailing key, which cannot change their bounds.)
+
+**Leased-fallback explain check (2026-10-13, MongoDB 8.2.11).** Partition
+`c` holds 1,000 leased jobs at vstamps 0..999e3 (`claim_id` set) and, above
+them, 200 delayed jobs at 1000e3..1199e3 (`claim_id` empty); all have
+`visible_at` a year ahead. Explain (`executionStats`) on the fallback: filter
+`{partition: "c", liveness: "pending", claim_id: {$gt: ""}}`, sort
+`{vstamp: -1, _id: -1}`, projection `{vstamp: 1}`, limit 1. Winning plan:
+`LIMIT` ← `PROJECTION_COVERED` ← backward `IXSCAN` on
+`partition_1_liveness_1_vstamp_1__id_1_visible_at_1_claim_id_1`, point bounds
+on `partition` and `liveness`, `claim_id ("", {})`. No rejected plans, no
+`SORT`, no `FETCH`. `totalKeysExamined` 201, `totalDocsExamined` 0,
+`nReturned` 1 (vstamp 999e3).
+
+Interpretation: the fallback is covered by the index. It examines one key
+per delayed job above the highest lease, plus one, and fetches nothing. It
+runs only when the visible read finds nothing.
 
 **Benchmark (2026-10-10, MongoDB 8.2.11).** `make bench`
 (`BenchmarkClaimComplete`, 2,000 jobs per sub-benchmark), median of three

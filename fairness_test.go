@@ -42,10 +42,10 @@ type plannedJob struct {
 
 // planTenant returns n jobs prefix-000.. on a tenant seeded at base, with
 // vstamps base + k*stride(cost, weight) for k = 1..n, where
-// stride = max(1, cost*1e6/weight). A tenant's base is the partition's
+// stride = max(1, cost*scale/weight). A tenant's base is the partition's
 // frontier when its cold seed runs (0 if nothing is visible).
 func planTenant(prefix string, n int, base, cost, weight int64) []plannedJob {
-	stride := max(1, cost*1_000_000/weight)
+	stride := max(1, cost*scale/weight)
 	jobs := make([]plannedJob, n)
 	for i := range jobs {
 		jobs[i] = plannedJob{id: fmt.Sprintf("%s-%03d", prefix, i), vstamp: base + int64(i+1)*stride}
@@ -86,7 +86,7 @@ func assertOrder(t *testing.T, got, want []string) {
 // TestFairnessFloodingTenant proves a tenant enqueuing after another's
 // backlog is not queued behind it: with equal cost and weight, B's jobs
 // interleave with A's from the start. B's cold seed floors it to the
-// frontier (a-000 at 1e6), so B joins one stride past the service point.
+// frontier (a-000 at 1e3), so B joins one stride past the service point.
 func TestFairnessFloodingTenant(t *testing.T) {
 	t.Parallel()
 
@@ -97,7 +97,7 @@ func TestFairnessFloodingTenant(t *testing.T) {
 	enqueueTenant(ctx, t, q, 50, EnqueueOpts{TenantID: "a", Cost: 1, Weight: 1})
 	enqueueTenant(ctx, t, q, 5, EnqueueOpts{TenantID: "b", Cost: 1, Weight: 1})
 
-	// b-00k is stamped (k+2)e6 and ties a-(k+1); ties break by _id, so
+	// b-00k is stamped (k+2)e3 and ties a-(k+1); ties break by _id, so
 	// a-(k+1) comes first.
 	var want []string
 	for i := range 50 {
@@ -112,7 +112,7 @@ func TestFairnessFloodingTenant(t *testing.T) {
 // TestFairnessWeightTwoToOne proves weight 2 doubles a tenant's share at
 // equal cost: every 3k prefix holds exactly 2k+1 A jobs while both have
 // work. A's extra job is the half-stride head start the frontier floor gives
-// the incumbent: B's cold seed finds a-000 at 0.5e6.
+// the incumbent: B's cold seed finds a-000 at 0.5e3.
 func TestFairnessWeightTwoToOne(t *testing.T) {
 	t.Parallel()
 
@@ -127,8 +127,8 @@ func TestFairnessWeightTwoToOne(t *testing.T) {
 	got := drainOrder(ctx, t, q, "")
 	assertOrder(t, got, expectedOrder(planTenant("a", n, 0, 1, 2), planTenant("b", n, scale/2, 1, 1)))
 
-	// B is stamped (k+1.5)e6, so 14 B jobs precede A's last job (a-029,
-	// vstamp 15e6) and both tenants have work through the first 44 claims:
+	// B is stamped (k+1.5)e3, so 14 B jobs precede A's last job (a-029,
+	// vstamp 15e3) and both tenants have work through the first 44 claims:
 	// k = 1..14.
 	for k := 1; 3*k <= 42; k++ {
 		aCount := 0
@@ -145,7 +145,7 @@ func TestFairnessWeightTwoToOne(t *testing.T) {
 
 // TestFairnessCheapVsExpensive proves cost scales a tenant's stride at equal
 // weight: one cost-4 job from B takes the slot of four cost-1 jobs from A,
-// starting from the frontier B's cold seed finds (a-000 at 1e6).
+// starting from the frontier B's cold seed finds (a-000 at 1e3).
 func TestFairnessCheapVsExpensive(t *testing.T) {
 	t.Parallel()
 
@@ -156,9 +156,9 @@ func TestFairnessCheapVsExpensive(t *testing.T) {
 	enqueueTenant(ctx, t, q, 20, EnqueueOpts{TenantID: "a", Cost: 1, Weight: 1})
 	enqueueTenant(ctx, t, q, 5, EnqueueOpts{TenantID: "b", Cost: 4, Weight: 1})
 
-	// A: 1e6..20e6; B: 5e6, 9e6, ..., 21e6. Ties break by _id, so for
-	// k < 4, b-00k follows a-(4k+4) (a-004 before b-000 at 5e6); b-004 at
-	// 21e6 comes after A's last job.
+	// A: 1e3..20e3; B: 5e3, 9e3, ..., 21e3. Ties break by _id, so for
+	// k < 4, b-00k follows a-(4k+4) (a-004 before b-000 at 5e3); b-004 at
+	// 21e3 comes after A's last job.
 	want := expectedOrder(planTenant("a", 20, 0, 1, 1), planTenant("b", 5, scale, 4, 1))
 	assertOrder(t, drainOrder(ctx, t, q, ""), want)
 }
@@ -174,7 +174,7 @@ func TestFairnessSameTenantCostNoReorder(t *testing.T) {
 	ctx := opCtx(t)
 	q := New(db.Collection("jobs"))
 
-	// Vstamps 10e6, 11e6, 16e6.
+	// Vstamps 10e3, 11e3, 16e3.
 	enqueued := []string{"a-002", "a-001", "a-000"}
 	for i, cost := range []int64{10, 1, 5} {
 		enqueueJob(ctx, t, q, EnqueueOpts{JobID: enqueued[i], TenantID: "a", Cost: cost, Weight: 1})
@@ -198,7 +198,7 @@ func TestFairnessSingleTenant(t *testing.T) {
 	var vtime int64
 	for i, cost := range costs {
 		enqueued[i] = fmt.Sprintf("job-%03d", len(costs)-1-i)
-		vtime += max(1, cost*1_000_000/1) // default weight is 1
+		vtime += max(1, cost*scale/1) // default weight is 1
 		wantVStamps[i] = vtime
 		enqueueJob(ctx, t, q, EnqueueOpts{JobID: enqueued[i], Cost: cost})
 	}
@@ -229,7 +229,7 @@ func TestFairnessPartitionScoped(t *testing.T) {
 		opts.JobID, opts.TenantID, opts.Partition = id, tenant, partition
 		enqueueJob(ctx, t, q, opts)
 	}
-	// Vstamps (x1e6): a-000..a-003 = 1..4 in p1; a-004 = 1 in p2 (fresh
+	// Vstamps (x1e3): a-000..a-003 = 1..4 in p1; a-004 = 1 in p2 (fresh
 	// timeline, not a's p1 vtime); b-000 = 2 in p2 (floored to a-004's
 	// frontier at 1); b-001 = 2 in p1 (floored to a-000's frontier at 1).
 	for i := range 4 {
@@ -260,7 +260,7 @@ func TestRaceFairnessConcurrentTenants(t *testing.T) {
 
 	const n = 50
 	tenants := []string{"a", "b"}
-	// a-000 = 1e6; b-000's cold seed finds a-000 at the frontier: 2e6.
+	// a-000 = 1e3; b-000's cold seed finds a-000 at the frontier: 2e3.
 	for _, tenant := range tenants {
 		enqueueJob(ctx, t, q, EnqueueOpts{JobID: tenant + "-000", TenantID: tenant, Cost: 1, Weight: 1})
 	}
@@ -283,7 +283,7 @@ func TestRaceFairnessConcurrentTenants(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// b-(k-1) ties a-k at (k+1)e6 and breaks by _id: a-k first.
+	// b-(k-1) ties a-k at (k+1)e3 and breaks by _id: a-k first.
 	want := []string{"a-000"}
 	for k := 1; k < n; k++ {
 		want = append(want, fmt.Sprintf("a-%03d", k), fmt.Sprintf("b-%03d", k-1))

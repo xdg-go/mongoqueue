@@ -4,14 +4,16 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"math"
 	"sync"
 	"testing"
 	"time"
 )
 
 // mustReserve calls reserve with a background context and fails the test on
-// error. With no seed hook wired (the pure-unit configuration) reserve cannot
-// fail, so the error branch exists only to satisfy the signature honestly.
+// error. With no seed hook wired (the pure-unit configuration) and an
+// in-budget cost, reserve cannot fail, so the error branch exists only to
+// satisfy the signature honestly.
 func mustReserve(t *testing.T, c *vtimeCache, tenant string, cost, weight int64) *vtimeReservation {
 	t.Helper()
 	r, err := c.reserve(context.Background(), tenant, defaultPartition, cost, weight)
@@ -197,6 +199,28 @@ func TestVtimeCacheSeedErrorRetries(t *testing.T) {
 	}
 }
 
+// TestVtimeCacheReserveOverflow verifies that a candidate past int64 fails
+// the reserve with ErrVTimeOverflow, releases the timeline lock, and leaves
+// vtime unchanged, so a smaller-stride reserve on the same timeline still
+// succeeds from the same base.
+func TestVtimeCacheReserveOverflow(t *testing.T) {
+	const edge = int64(math.MaxInt64 - 1_500)
+	c := newVtimeCache()
+	c.seedHook = func(context.Context, string, string) (int64, error) { return edge, nil }
+
+	_, err := c.reserve(context.Background(), "tenant-a", defaultPartition, 2, 1)
+	if !errors.Is(err, ErrVTimeOverflow) {
+		t.Fatalf("reserve past int64: err = %v, want ErrVTimeOverflow", err)
+	}
+
+	// A held lock would deadlock here.
+	r := mustReserve(t, c, "tenant-a", 1, 1)
+	defer r.Abort()
+	if want := edge + stride(1, 1); r.vstamp != want {
+		t.Errorf("vstamp after overflow = %d, want %d", r.vstamp, want)
+	}
+}
+
 // TestVtimeCachePartitionsAreIndependentTimelines verifies that one tenant
 // in two partitions gets two independent timelines, each seeded once.
 func TestVtimeCachePartitionsAreIndependentTimelines(t *testing.T) {
@@ -250,7 +274,7 @@ var defaultKey = timelineKey{tenant: "tenant-a", partition: defaultPartition}
 // reserved since the previous walk stale, so its next reserve re-runs the
 // seed and stamps from the new seed rather than the cached vtime.
 func TestVtimeCacheTouchedEntryIsInvalidated(t *testing.T) {
-	seeds := &seedSequence{seeds: []int64{0, 50_000_000}}
+	seeds := &seedSequence{seeds: []int64{0, 50 * scale}}
 	c := newVtimeCache()
 	c.seedHook = seeds.hook
 
@@ -264,7 +288,7 @@ func TestVtimeCacheTouchedEntryIsInvalidated(t *testing.T) {
 	if seeds.calls != 2 {
 		t.Errorf("seed calls = %d, want 2", seeds.calls)
 	}
-	if want := int64(51_000_000); got != want {
+	if want := int64(51 * scale); got != want {
 		t.Errorf("vstamp after invalidation = %d, want %d", got, want)
 	}
 }
@@ -273,7 +297,7 @@ func TestVtimeCacheTouchedEntryIsInvalidated(t *testing.T) {
 // lifetime: the first walk clears touched, the second removes the entry, and
 // the next reserve creates a fresh entry that seeds.
 func TestVtimeCacheUntouchedEntryIsEvicted(t *testing.T) {
-	seeds := &seedSequence{seeds: []int64{0, 7_000_000}}
+	seeds := &seedSequence{seeds: []int64{0, 7 * scale}}
 	c := newVtimeCache()
 	c.seedHook = seeds.hook
 
@@ -308,7 +332,7 @@ func TestVtimeCacheUntouchedEntryIsEvicted(t *testing.T) {
 	if seeds.calls != 2 {
 		t.Errorf("seed calls = %d, want 2", seeds.calls)
 	}
-	if want := int64(8_000_000); got != want {
+	if want := int64(8 * scale); got != want {
 		t.Errorf("vstamp after eviction = %d, want %d", got, want)
 	}
 }
@@ -318,7 +342,7 @@ func TestVtimeCacheUntouchedEntryIsEvicted(t *testing.T) {
 // reserve setting touched) neither blocks nor evicts it, but marks it stale
 // so the next reserve re-seeds.
 func TestVtimeCacheBusyEntryIsNotEvicted(t *testing.T) {
-	seeds := &seedSequence{seeds: []int64{0, 30_000_000}}
+	seeds := &seedSequence{seeds: []int64{0, 30 * scale}}
 	c := newVtimeCache()
 	c.seedHook = seeds.hook
 
@@ -367,7 +391,7 @@ func TestVtimeCacheBusyEntryIsNotEvicted(t *testing.T) {
 	if seeds.calls != 2 {
 		t.Errorf("seed calls = %d, want 2", seeds.calls)
 	}
-	if want := int64(31_000_000); got != want {
+	if want := int64(31 * scale); got != want {
 		t.Errorf("vstamp after busy walk = %d, want %d", got, want)
 	}
 }
@@ -376,7 +400,7 @@ func TestVtimeCacheBusyEntryIsNotEvicted(t *testing.T) {
 // map lookup and its entry lock, and verifies the reserve retries onto a
 // fresh entry and stamps from its new seed, never from the orphan's vtime.
 func TestVtimeCacheEvictedEntryRetry(t *testing.T) {
-	seeds := &seedSequence{seeds: []int64{0, 90_000_000}}
+	seeds := &seedSequence{seeds: []int64{0, 90 * scale}}
 	c := newVtimeCache()
 	c.seedHook = seeds.hook
 
@@ -414,8 +438,8 @@ func TestVtimeCacheEvictedEntryRetry(t *testing.T) {
 	if seeds.calls != 2 {
 		t.Errorf("seed calls = %d, want 2", seeds.calls)
 	}
-	// Stamping from the orphan (vtime 1e6, not stale) would have given 2e6.
-	if want := int64(91_000_000); got != want {
+	// Stamping from the orphan (vtime 1e3, not stale) would have given 2e3.
+	if want := int64(91 * scale); got != want {
 		t.Errorf("vstamp = %d, want %d (from new seed)", got, want)
 	}
 }
@@ -429,7 +453,7 @@ func TestVtimeCacheReconcileRace(t *testing.T) {
 	const (
 		perWorker = 100
 		workers   = 2
-		unit      = int64(1_000_000) // stride(1, 1)
+		unit      = int64(scale) // stride(1, 1)
 	)
 	partitions := []string{"p1", "p2"}
 
@@ -642,7 +666,7 @@ func TestVtimeCacheColdSeedLWMErrorRetries(t *testing.T) {
 
 // TestVtimeCacheLWMTracksFrontier verifies the stored LWM is the last
 // computed frontier with no monotone hold: it follows a dip, and a refresh
-// that finds no visible job keeps the prior value.
+// that finds no frontier keeps the prior value.
 func TestVtimeCacheLWMTracksFrontier(t *testing.T) {
 	type result struct {
 		lwm int64
@@ -671,7 +695,7 @@ func TestVtimeCacheLWMTracksFrontier(t *testing.T) {
 
 // TestVtimeCacheLWMPrunedWithPartition verifies that evicting a partition's
 // last cached entry deletes its stored LWM, so a later cold seed there that
-// finds no visible job starts from 0 rather than the stale frontier, while a
+// finds no frontier starts from 0 rather than the stale frontier, while a
 // partition that keeps an entry keeps its LWM.
 func TestVtimeCacheLWMPrunedWithPartition(t *testing.T) {
 	const lwm = int64(10 * scale)
@@ -787,24 +811,96 @@ func TestVtimeCacheSeedTakesMax(t *testing.T) {
 	}
 }
 
-// TestReconcileFailedRefreshLeavesCacheUntouched verifies that a reconcile
-// whose LWM refresh fails for one of two partitions skips the walk: a
-// touched entry stays seeded, touched, and not stale. The Queue has only a
-// cache with fake hooks; reconcile touches nothing else, so no database is
-// needed.
-func TestReconcileFailedRefreshLeavesCacheUntouched(t *testing.T) {
+// TestReconcileFailedRefreshStillWalks verifies that a reconcile whose LWM
+// refresh fails for one of two partitions still refreshes the other, returns
+// the failure, and runs the walk: touched entries in both partitions are
+// marked stale and an idle entry is evicted. The Queue has only a cache with
+// fake hooks; reconcile touches nothing else, so no database is needed.
+func TestReconcileFailedRefreshStillWalks(t *testing.T) {
 	ctx := context.Background()
+	errFrontier := errors.New("frontier failure")
 	failing := false
 	c := newVtimeCache()
 	c.lwmHook = func(_ context.Context, partition string) (int64, bool, error) {
-		if failing && partition == "p2" {
-			return 0, false, errors.New("frontier failure")
+		switch {
+		case failing && partition == "p2":
+			return 0, false, errFrontier
+		case failing:
+			return 10 * scale, true, nil
 		}
 		return 0, true, nil
 	}
 	q := &Queue{vtimes: c}
 
+	reserveCommit := func(tenant, partition string) {
+		t.Helper()
+		r, err := c.reserve(ctx, tenant, partition, 1, 1)
+		if err != nil {
+			t.Fatalf("reserve(%q, %q): %v", tenant, partition, err)
+		}
+		r.Commit()
+	}
+
+	// tenant-idle is touched before the first reconcile only, so the second
+	// walk evicts it.
+	reserveCommit("tenant-idle", "p2")
+	if err := q.Reconcile(ctx); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	reserveCommit("tenant-a", "p1")
+	reserveCommit("tenant-a", "p2")
+
+	failing = true
+	if err := q.Reconcile(ctx); !errors.Is(err, errFrontier) {
+		t.Fatalf("reconcile with failing p2: err = %v, want errFrontier", err)
+	}
+
+	if got := c.lwmFor("p1"); got != 10*scale {
+		t.Errorf("p1 LWM = %d, want %d (refreshed despite p2 failure)", got, 10*scale)
+	}
 	for _, p := range []string{"p1", "p2"} {
+		key := timelineKey{tenant: "tenant-a", partition: p}
+		c.mu.Lock()
+		tl, ok := c.tenants[key]
+		c.mu.Unlock()
+		if !ok {
+			t.Fatalf("timeline %v evicted, want marked stale", key)
+		}
+		if tl.touched.Load() {
+			t.Errorf("timeline %v: touched not cleared", key)
+		}
+		if !tl.stale.Load() {
+			t.Errorf("timeline %v: not marked stale", key)
+		}
+	}
+	c.mu.Lock()
+	_, idleCached := c.tenants[timelineKey{tenant: "tenant-idle", partition: "p2"}]
+	c.mu.Unlock()
+	if idleCached {
+		t.Error("idle timeline survived a reconcile with a failed refresh")
+	}
+}
+
+// TestReconcileCanceledMidRefreshStopsRefreshingStillWalks verifies that a
+// ctx canceled during one partition's refresh skips the remaining refreshes
+// (one error, not one per partition) but still runs the walk.
+func TestReconcileCanceledMidRefreshStopsRefreshingStillWalks(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	armed := false
+	hookCalls := 0
+	c := newVtimeCache()
+	c.lwmHook = func(ctx context.Context, _ string) (int64, bool, error) {
+		if !armed {
+			return 0, true, nil
+		}
+		hookCalls++
+		cancel()
+		return 0, false, ctx.Err()
+	}
+	q := &Queue{vtimes: c}
+
+	for _, p := range []string{"p1", "p2", "p3"} {
 		r, err := c.reserve(ctx, "tenant-a", p, 1, 1)
 		if err != nil {
 			t.Fatalf("reserve(%q): %v", p, err)
@@ -812,30 +908,18 @@ func TestReconcileFailedRefreshLeavesCacheUntouched(t *testing.T) {
 		r.Commit()
 	}
 
-	failing = true
-	if err := q.Reconcile(ctx); err == nil {
-		t.Fatal("reconcile with failing lwmHook: got nil error, want failure")
+	armed = true
+	if err := q.Reconcile(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("reconcile err = %v, want context.Canceled", err)
 	}
-
-	for _, p := range []string{"p1", "p2"} {
-		key := timelineKey{tenant: "tenant-a", partition: p}
-		c.mu.Lock()
-		tl, ok := c.tenants[key]
-		c.mu.Unlock()
-		if !ok {
-			t.Fatalf("timeline %v evicted by failed reconcile", key)
-		}
-		if !tl.touched.Load() {
-			t.Errorf("timeline %v: touched cleared by failed reconcile", key)
-		}
-		if tl.stale.Load() {
-			t.Errorf("timeline %v: marked stale by failed reconcile", key)
-		}
-		tl.mu.Lock()
-		seeded := tl.seeded
-		tl.mu.Unlock()
-		if !seeded {
-			t.Errorf("timeline %v: unseeded by failed reconcile", key)
+	if hookCalls != 1 {
+		t.Errorf("refreshes after cancel = %d, want 1", hookCalls)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for key, tl := range c.tenants {
+		if !tl.stale.Load() {
+			t.Errorf("timeline %v not marked stale", key)
 		}
 	}
 }

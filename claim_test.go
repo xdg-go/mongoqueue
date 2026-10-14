@@ -133,7 +133,7 @@ func TestClaimOrdersByVStampThenID(t *testing.T) {
 	insert("tie-b", "t3", scale)
 	insert("tie-a", "t4", scale)
 
-	// z-cheap and both ties share vstamp 1e6; _id orders them.
+	// z-cheap and both ties share vstamp 1e3; _id orders them.
 	// Guard the premise so the tie-break cannot pass vacuously.
 	tieA, tieB, cheap := findJob(ctx, t, q, "tie-a"), findJob(ctx, t, q, "tie-b"), findJob(ctx, t, q, "z-cheap")
 	if tieA.VStamp != tieB.VStamp || tieA.VStamp != cheap.VStamp {

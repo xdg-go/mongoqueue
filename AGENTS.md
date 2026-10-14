@@ -40,10 +40,11 @@ the caller above the primitive.
   `VisibleAt`, `Attempts`, `StampedBy`, `ResolvedAt`, `Kind`); the body is the
   caller's domain data, stored as a native BSON subdocument (`bson.Raw`) --
   opaque to queue code, queryable in the database.
-- **Virtual time is fixed-point.** VStamps/vtimes are `int64` in 1e-6 units;
+- **Virtual time is fixed-point.** VStamps/vtimes are `int64` in 1e-3 units;
   stride = `max(1, cost*SCALE/weight)`, weight an `int64` per-enqueue field
-  (zero means 1). Weight consistency across a tenant's producers is a caller
-  obligation, like single-writer.
+  (zero means 1). Stamp arithmetic is checked: overflow fails the enqueue.
+  Weight consistency across a tenant's producers is a caller obligation, like
+  single-writer.
 - **Typed facade over an opaque core.** Generics live only at the API boundary
   as per-kind bindings (`NewKind[T](kind)` returns a `Kind[T]` whose
   `Enqueue`/`Decode` methods carry the kind↔type pairing declared at one

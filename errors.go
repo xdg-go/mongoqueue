@@ -47,6 +47,14 @@ var ErrInvalidWeight = errors.New("mongoqueue: weight must be >= 1 (zero means 1
 // immediately reclaimable); a job cannot be made visible in the past.
 var ErrInvalidDelay = errors.New("mongoqueue: delay must be >= 0")
 
+// ErrVTimeOverflow signals an enqueue whose virtual timestamp would exceed
+// int64: the cost is too large to scale, or the (tenant, partition)
+// timeline has exhausted its virtual clock. Nothing is inserted. The
+// fixed-point budget is sized to be out of reach (see the design docs);
+// hitting it means costs are expressed in units far finer than the budget
+// assumes.
+var ErrVTimeOverflow = errors.New("mongoqueue: virtual time overflow")
+
 // ErrKindMismatch signals a Decode through a binding whose kind does not
 // match the job's stored kind -- kind↔type drift caught at the boundary
 // instead of silently decoding one kind's body as another's type. The

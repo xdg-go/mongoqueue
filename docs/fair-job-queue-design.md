@@ -89,13 +89,26 @@ mid-backlog change leaves already-stamped jobs in place, a bounded transition
 effect (a raised weight underserves the tenant until its old stamps drain).
 
 **Virtual-time representation.** Virtual time is fixed-point: vstamps and
-vtimes are 64-bit integers in units of 1/SCALE, with SCALE = 10^6. The stride
+vtimes are 64-bit integers in units of 1/SCALE, with SCALE = 10^3. The stride
 is `max(1, cost * SCALE / weight)` in pure integer arithmetic (weight is a
 positive integer; zero means one). The floor guarantees every enqueue advances
 vtime -- preserving the invariant that a tenant's vstamps strictly increase --
-and binds only when `cost < weight/SCALE`, where its fairness distortion is
-negligible. Overflow is out of reach: at a sustained 10^6 cost-units per
-second at weight 1, a 64-bit virtual clock wraps after roughly 292,000 years.
+and binds only when `cost < weight/SCALE`.
+
+SCALE divides the 64-bit range between sub-unit precision and headroom. Cost
+units are abstract, so SCALE and the caller's choice of unit are
+interchangeable: SCALE only sets the precision a small integer cost gets.
+Truncation error in a stride is below `weight / (cost * SCALE)`, under 1%
+while weight is at most ten times cost; callers who need finer weight ratios
+express cost in finer units. Headroom is about `2^63 / SCALE` (9.2 x 10^15)
+cumulative cost per unit weight. Because memoryless placement carries every
+new timeline up to its partition's frontier, that budget belongs to the
+partition's virtual clock, which advances while the partition has work. At a
+sustained 10^6 cost-units per second at weight 1 it lasts about 292 years; at
+10^3 per second, about 292,000. Stamp arithmetic is checked: an enqueue whose
+stamp would exceed the range fails rather than wrapping to a negative stamp
+that would sort ahead of every pending job.
+
 Floating-point is rejected for the stamp: it puts rounding and comparability
 hazards inside a sorted index key for no expressive gain.
 
@@ -214,6 +227,15 @@ its own point of service. Only *visible* jobs count: a leased or delayed job
 with a low vstamp is not about to be served, and letting it hold the frontier
 low would hand every newcomer stale credit.
 
+When no job is visible, the frontier is the vstamp most recently put into
+service: the maximum vstamp among the partition's **leased** jobs. This is
+start-time fair queueing's answer for a server with nothing waiting (system
+virtual time is the start tag of the work in service), and it is the common
+case, not an edge: a partition whose workers keep up has every pending job
+leased most of the time. Delayed jobs, never claimed or released with a
+delay, are not in service and do not count. A partition with no visible and
+no leased job -- empty, or holding only delayed jobs -- has no frontier.
+
 The LWM is soft state like vtime itself, computed on the stamping node and not
 held consistent across the fleet. A node refreshes a partition's LWM when it
 first creates a timeline in that partition (so a new or returning tenant is
@@ -222,10 +244,19 @@ reconciliation. It is the last computed frontier, not a running maximum: the
 frontier can move backward when a delayed job turns visible or an expired
 lease re-enters the visible set, and the floor follows it, because the floor's
 job is to place a tenant at the actual point of service. A computation that
-finds no visible job leaves the previous value in place. When every pending
-job in the partition is leased or delayed, that keeps the floor at the old
-frontier, so a new tenant is placed above those jobs rather than ahead of
-them; this is intended.
+finds no frontier leaves the previous value in place (0 on a node with none),
+which places a newcomer at or below the old point of service; only delayed
+work remains to compete with it, and that work carries its tenant's own
+enqueue-time stamps.
+
+Holding the old value instead of falling back to leased jobs was rejected.
+The stored frontier is refreshed only when a computation finds one, so in a
+partition that stays fully leased it ages without bound, and a cold node has
+no value at all. A newcomer seeded there is stamped far below incumbents'
+trailing edges. Once contention begins, its low stamps define the visible
+frontier, so its re-seeds stay low too, and it monopolizes the partition
+until its vtime catches up: unbounded idle credit, which memoryless placement
+exists to prevent.
 
 Refreshes are not sequenced against each other. A refresh that finishes late
 may overwrite a newer frontier with an older, lower one. The dip is bounded by
@@ -723,7 +754,7 @@ A model or test suite should establish:
   backlog; reclaim preserves the job's original vstamp; lease expiry,
   stealing, heartbeats, and early release do not alter any stamp or vtime.
   Visibility changes do move the sampled low-water mark, since the frontier is
-  defined over visible jobs.
+  defined over visible jobs (and over leased jobs when none is visible).
 - **Enqueue accounting:** a tenant's cached vtime advances only when the
   job's durable insert succeeds; a failed or duplicate insert advances
   nothing. (Compute the stamp speculatively, commit the cache advance on
@@ -803,6 +834,18 @@ lets a tenant idle for a year monopolize the queue for as long as its credit
 lasts; a bounded allowance is a knob with little to buy, since the frontier
 already places a sparse tenant's job within one stride of the front. Rejected
 in favor of memoryless placement.
+
+**Finer fixed-point scale, or unchecked stamp arithmetic.** An earlier
+revision used SCALE = 10^6 and left overflow unguarded on the strength of a
+miscalculated bound. The real headroom at 10^6 is about 107 days of a sustained
+10^6 cost-units per second, reachable when cost is denominated in bytes or
+milliseconds. Precision beyond 10^3 serves only weights far above cost, which
+callers can reach by choosing finer cost units. Among responses to exhausting
+the range, a saturating add was rejected because saturated stamps tie and
+lose ordering silently; rebasing stored stamps onto a per-partition epoch was
+rejected because it reintroduces cross-node coordination; wider stamps
+(decimal or composite keys) were rejected for index size and sort complexity.
+A failing enqueue is the loud, local outcome.
 
 **One tenant timeline across partitions.** An earlier revision kept one vtime
 per tenant regardless of partition. With several partitions there is no single
