@@ -50,7 +50,7 @@ gitignored and is never committed.
 ```
 7.0 Decisions (read first)
        │
-       ├─► 7.1 TTL shape test (independent)
+       ├─► 7.1 Partial TTL index + shape tests (independent)
        │
        ▼
 7.2 Reconciliation: forward pass (both design docs)
@@ -78,11 +78,22 @@ decided deviation is its own commit.
 
 - **TTL: shape, not deletion.** The TTL monitor runs every 60s; testing
   actual deletion needs a sleep or a server-wide `ttlMonitorSleepSecs`
-  change. The queue's obligation is that `resolved_at` exists exactly on
-  resolved jobs and the index is a TTL index on it; the server does the
-  rest. `resolved_at` is `omitempty`, and that matters: a stored zero
-  `time.Time` would be year 1 and the TTL monitor would delete the pending
-  job on its next pass.
+  change. The queue's obligation is the index shape and the document
+  shapes it acts on; the server does the rest.
+- **TTL index is partial on `liveness: "resolved"`.** The current index
+  is a plain TTL on `resolved_at`, so pending jobs are safe only because
+  `resolved_at` is `omitempty`: a stored zero `time.Time` is year 1, and
+  the monitor would delete the pending job on its next pass. A
+  `partialFilterExpression` of `{liveness: "resolved"}` keeps pending jobs
+  out of the index entirely, so safety rests on the liveness state machine
+  (Complete and Cancel set `liveness` and `resolved_at` in one update), not
+  on a struct tag. It also drops a null-key index entry per pending job
+  (non-sparse indexes store missing fields as null): no TTL write at
+  enqueue, one insert at resolve, one delete at removal. Named
+  `mongoqueue_ttl`, matching the other three. Nothing is deployed, so the
+  old unnamed TTL spec is simply replaced -- no migration note.
+  `omitempty` stays (pending documents should not carry a dummy date);
+  it is no longer what keeps them alive.
 - **Observability: build nothing.** `stamped_by` is wired and tested
   (`enqueue_test.go`, `TestEnqueue...` asserting `node-under-test`). No
   metrics, stats returns, or hooks; callers query the collection.
@@ -122,18 +133,32 @@ survives across sessions.
 
 ---
 
-## 7.1 TTL Shape Test
+## 7.1 Partial TTL Index and Shape Tests
 
+- [ ] `EnsureTTLIndex` (`queue.go`): add `SetName("mongoqueue_ttl")` and
+  `SetPartialFilterExpression(bson.D{{"liveness", LivenessResolved}})`;
+  add `ttlIndexName` beside the other index-name constants
+- [ ] Rewrite `EnsureTTLIndex` godoc: the index holds resolved jobs only,
+  so the TTL can never touch a pending or claimed job regardless of its
+  fields; keep the retention-range, conflict/`collMod`, and service-clock
+  paragraphs
+- [ ] **Test**: update `TestEnsureTTLIndex` -- name `mongoqueue_ttl`, key
+  `{resolved_at: 1}`, `expireAfterSeconds`, and
+  `partialFilterExpression == {liveness: "resolved"}`
 - [ ] **Test**: `TestResolvedAtOnlyOnResolvedJobs` -- drive one job each
   through: enqueued (pending, never claimed), delayed, claimed,
   heartbeated, released, lease-expired (claim, then write `visible_at`
   into the past), completed, canceled before claim, canceled while
   claimed. Read each raw document (`bson.Raw`, not `Job`, so a zero time
-  cannot hide) and assert `resolved_at` is absent for the pending six and
-  a BSON date for the resolved three
-- [ ] Confirm `EnsureTTLIndex` godoc states the `omitempty` dependency
-  (pending jobs omit the field, so the TTL monitor skips them); add one
-  sentence if missing
+  cannot hide) and assert `liveness` and `resolved_at` agree: the pending
+  six have `liveness: "pending"` and no `resolved_at`; the resolved three
+  have `liveness: "resolved"` and a BSON date
+- [ ] **Doc**: mongodb doc "Indexes, contention, and GC" -- TTL row of the
+  index table (name, partial filter), the write-cost paragraph (TTL
+  writes per lifecycle), and the GC/retention text; fair doc "Storage
+  requirements" GC note if it describes which records the TTL sees.
+  Grep docs and godoc for `resolved_at` and "TTL" and fix what the
+  partial filter changes
 - [ ] Mark 7.1 done in `docs/implementation-plan.md`
 
 ---

@@ -253,10 +253,15 @@ caller can query the collection); `stamped_by` is already wired and tested
 - Trust the server's TTL monitor; test only the shapes it acts on. No
   short-retention test (the monitor runs every 60s; lowering
   `ttlMonitorSleepSecs` mutates server-wide state)
-- **Test**: TTL index shape is already covered (`TestEnsureTTLIndex`); add
-  a lifecycle test that pending, claimed, heartbeated, released, and
-  lease-expired jobs carry no `resolved_at`, and completed and canceled
-  jobs do
+- Make the TTL index partial on `{liveness: "resolved"}` and name it
+  `mongoqueue_ttl` (decided 2026-10-17): pending jobs never enter the
+  index, so their safety no longer depends on `resolved_at` being
+  `omitempty`, and pending jobs stop costing a null-key TTL entry.
+  Nothing is deployed; the old spec is replaced without migration
+- **Test**: `TestEnsureTTLIndex` asserts name and partial filter; a
+  lifecycle test reads raw BSON and asserts `liveness` and `resolved_at`
+  agree -- pending, claimed, heartbeated, released, and lease-expired jobs
+  carry no `resolved_at`; completed and canceled jobs carry a date
 
 ### 7.3 Design-doc reconciliation against the code
 Phases 3-6 changed the design as they went (per-(tenant, partition)
