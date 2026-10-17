@@ -112,7 +112,7 @@ stride := max(1, cost*SCALE/weight)   // pure integer arithmetic
 
 Weight is `int64`, must be >= 1, and the zero value means 1 -- so the
 single-tenant / don't-care case configures nothing. The `max(1, ...)` floor
-preserves the strictly-increasing-within-tenant invariant at extreme
+preserves the strictly-increasing-per-timeline invariant at extreme
 cost/weight ratios. Stamp arithmetic is checked: when `cost*SCALE` or
 `vtime + stride` would exceed `int64`, the enqueue fails with
 `ErrVTimeOverflow` and inserts nothing. The budget (~292 years at a sustained
@@ -192,11 +192,11 @@ func (k Kind[T]) Enqueue(ctx context.Context, q *Queue, body T, opts EnqueueOpts
 func (k Kind[T]) Decode(j *Job) (T, error) // ErrKindMismatch unless j.Kind == k.Kind()
 
 type EnqueueOpts struct {
-    JobID     string // caller-supplied; the record _id and idempotency key
+    JobID     string // required (ErrMissingJobID); the record _id and idempotency key
     TenantID  string
-    Partition string // empty = default partition
+    Partition string // empty or "default" = default partition
     Cost      int64  // floored to a small positive minimum
-    Weight    int64  // zero means 1; must otherwise be >= 1
+    Weight    int64  // zero means 1; must otherwise be >= 1 (ErrInvalidWeight)
     Delay     time.Duration // delayed enqueue: visible_at = now + Delay; zero = immediately visible
 }
 
@@ -325,12 +325,13 @@ now`, so the same query reclaims it with no separate branch.
 **Decisions encoded in the signature:**
 
 1. **Empty queue is a sentinel** (`ErrNoJob`), not `(nil, nil)`. An idle
-   partition is the common case and must be unmissable; matches
-   `mongo.ErrNoDocuments`.
+   partition is the common case and must be unmissable; it mirrors
+   `mongo.ErrNoDocuments` without wrapping it.
 2. **The library mints the claim id**; it is not a caller argument. "Unique per
    claim, never reused" is the fence's whole job and the library's to guarantee.
-   For worker-identity observability, add a separate `claimed_by` label via
-   `ClaimOpts` rather than overloading the fence.
+   A separate `claimed_by` label via `ClaimOpts`, for worker-identity
+   observability without overloading the fence, is deferred (implementation
+   plan "Future Phases").
 3. **The fence rides on the handle** so the hot path cannot fumble it --
    `Heartbeat`, `Release`, and `Complete` capture `claimID`.
 
@@ -572,9 +573,10 @@ name, no COLLSCAN or blocking SORT, covered seed/clock/fallback reads (no
 documents examined), and keys examined bounded independent of backlog: 1
 for the covered reads, 1 + in-flight + 1 for the claim.
 
-The checks below date from before 2026-10-17 and ran against the old full
-indexes; the claim and seed scan shapes are unchanged (`liveness` was a point
-bound and is now the partial filter).
+The checks and benchmark below date from before 2026-10-17 and ran against
+earlier full indexes; the claim and seed scan shapes are unchanged (`liveness`
+was a point bound and is now the partial filter), but the seed read is now
+covered and fetches no document.
 
 **Explain check (2026-10-09, MongoDB 8.2.11).** One partition seeded with
 10,000 pending jobs at low vstamps with `visible_at` a year in the future,
@@ -614,7 +616,7 @@ write concern, so the server default `w: "majority"` applies. Host: Apple M4,
 10 cores, 16 GB RAM, macOS 26.6.2, Go 1.26.4. Each cycle is a Claim followed
 by an immediate Complete, run by G concurrent workers on one partition, so
 the leased prefix stays near G entries. It does not measure claims against a
-large in-flight leased prefix; the explain check above covers that scan cost.
+large in-flight leased prefix; the explain checks above cover that scan cost.
 Each sub-benchmark opens a fresh client and the warm-up opens one
 connection, so pool ramp-up to G connections falls inside the timed region;
 the numbers include it rather than reflecting steady state.
@@ -699,8 +701,9 @@ a rebuild.
 - **Batch enqueue.** The per-timeline vtime cache makes batching natural
   (one cache advance, one `InsertMany`); leave API room, not in v1.
 - **Multi-writer detection.** `stamped_by` is recorded now (cheap to add
-  early, expensive to retrofit). The consumer -- a per-tenant distinct-writer
-  count during reconciliation surfacing a warning metric -- is future work.
+  early, expensive to retrofit). The consumer -- a per-(tenant, partition)
+  distinct-writer count during reconciliation surfacing a warning metric --
+  is future work.
 
 ## Open Questions
 

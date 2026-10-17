@@ -362,9 +362,10 @@ consequence depends on whether fan-out is uniform across tenants.
 
 Both failure modes are silent: compressed stamps look like ordinary stamps.
 The stamping node therefore records its identity on each job at stamp time,
-making the failure detectable after the fact. A periodic per-tenant
-distinct-writer count during reconciliation, surfaced as a warning metric, is
-deferred future work; the recorded writer id is the durable hook it will need.
+making the failure detectable after the fact. A periodic per-(tenant,
+partition) distinct-writer count during reconciliation, surfaced as a warning
+metric, is deferred future work; the recorded writer id is the durable hook it
+will need.
 
 ## Two-stage stamp partitioning
 

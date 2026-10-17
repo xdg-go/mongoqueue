@@ -180,13 +180,13 @@ it. Record every statement in the `REVIEW.md` worksheet.
   "claim index" with `liveness`/`claim_id` keys
 
 ### 7.2.2 `docs/mongodb-go-library-design.md`
-- [ ] Walk every section in order; check field names and BSON tags
+- [x] Walk every section in order; check field names and BSON tags
   against `job.go`, query filters/sorts/projections against `claim.go`,
   `queue.go`, `resolve.go`, `lease.go`, index specs against
   `EnsureIndexes`, errors against `errors.go`
-- [ ] The pre-2026-10-17 explain checks: confirm each is labeled
+- [x] The pre-2026-10-17 explain checks: confirm each is labeled
   historical and none is cited as current behavior
-- [ ] Fix every **doc lags** finding; record the rest
+- [x] Fix every **doc lags** finding; record the rest
 
 ---
 
