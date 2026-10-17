@@ -204,6 +204,14 @@ This model chooses to use **trailing edge**, with the expectation that
 single-writer-per-timeline is satisfied or that the deviations described later
 are acceptable.
 
+Trailing-edge re-seeding has one accepted side effect. A timeline's highest
+job can dispatch before its lower ones when those are delayed or leased. Once
+it resolves, the trailing edge drops below it, and the timeline's next job
+can be stamped below a job already served. The over-service is small and
+confined to one partition. The ordering guarantee is therefore that a new
+stamp exceeds every *pending* stamp on its timeline, not every stamp the
+timeline ever issued.
+
 Reconciliation need not rewrite the cache eagerly. Marking each entry stale so
 that its next enqueue re-runs the seed, under the same per-timeline exclusion
 that protects stamping, achieves the same drift bound without a second writer
@@ -536,7 +544,10 @@ caller-chosen delay (zero means immediately reclaimable) and **clears the
 claim id**. The delay is the caller's backoff lever; the queue supplies the
 primitive, never the retry policy. The next claim of a released job is an
 ordinary claim -- the attempt count still increments, and the job keeps its
-original vstamp. Release is not a virtual-time event.
+original vstamp. Release is not a virtual-time event, for the same reasons
+reclaim is not: the releasing worker does not hold the tenant's timeline, so
+a fresh stamp would be a second writer. Because the frontier is the service
+clock, a released low-stamped retry does not hold the floor back either.
 
 Release must clear the claim id, unlike cancellation. It is the one transition
 that would otherwise leave a stale fence live: after a steal the new claim
@@ -764,6 +775,8 @@ A model or test suite should establish:
   job's durable insert succeeds; a failed or duplicate insert advances
   nothing. (Compute the stamp speculatively, commit the cache advance on
   insert success.)
+- **Timeline order:** a new stamp exceeds every pending stamp on its
+  timeline. It may fall below a stamp already served (see "Reconciliation").
 - **Bounded retries:** a job that repeatedly fails its worker is resolved as
   exhausted at a finite attempt threshold, never retried forever. (This
   property must be enforced within the worker; the library only provides the
@@ -853,7 +866,11 @@ lags by the in-flight window and must skip every job canceled before claim
 that is stamped above the clock. Holding the last computed value instead of
 any fallback was also rejected: in a partition that stays fully leased it
 ages without bound, a cold node has no value at all, and a newcomer seeded
-there monopolizes the partition until its vtime catches up.
+there monopolizes the partition until its vtime catches up. A running
+maximum (`lwm = max(lwm, computed)`) was rejected as well. It protected an
+earlier multi-query, non-snapshot computation from dips; the clock is one
+query, and memoryless placement wants the floor at the actual point of
+service, small dips included.
 
 **Idle credit.** Letting a returning tenant keep its stale vtime (no floor), or
 flooring it some fixed allowance below the frontier (a CFS-style sleeper
