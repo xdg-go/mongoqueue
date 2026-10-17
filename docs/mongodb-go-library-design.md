@@ -428,7 +428,7 @@ design:
   resolution."
 - **`Cancel` stays queue-level** -- issued by an external caller holding no lease,
   guarding on pending liveness alone, naming only the job id:
-  `q.Cancel(ctx, jobID)`. It takes no resolution: the canceller invokes a
+  `q.Cancel(ctx, jobID)`. It takes no resolution: the canceler invokes a
   queue verb rather than reporting an outcome, so the library writes
   `ResolutionCanceled` unconditionally. This makes a stored `"canceled"` a
   reliable marker of the cancel path (by convention, callers never pass
@@ -541,7 +541,7 @@ visibility. All these reads go through the primary-routed collection handle
 
 **Explain check (2026-10-17, MongoDB 8.2.11).** A one-off measurement script,
 not kept in the repository, on one partition with 2,000 claimed-and-resolved
-jobs, 50 cancelled-before-claim at high stamps, one long lease at a low stamp,
+jobs, 50 canceled-before-claim at high stamps, one long lease at a low stamp,
 20 in flight, a 10,000-job visible backlog, 100 delayed jobs, and 5 released
 retries; plus a never-claimed, delayed-only partition.
 
@@ -556,12 +556,12 @@ retries; plus a never-claimed, delayed-only partition.
 Interpretation: the clock, seed, and fallback reads each examine one key and
 fetch nothing, independent of backlog size. The claim scans the invisible
 prefix below the first visible job (the long lease, in-flight jobs) and
-fetches one document. Cancelled-before-claim jobs never enter the clock
+fetches one document. Canceled-before-claim jobs never enter the clock
 index, so the clock does not scan past them.
 
 `explain_test.go` (`TestExplainQueriesUseIndexes`) re-checks the plan shape
 on a smaller fixture: 300 resolved, 20 in flight, one long lease, 5
-released, a 2,000-job backlog, 100 delayed, and 50 cancelled-before-claim,
+released, a 2,000-job backlog, 100 delayed, and 50 canceled-before-claim,
 plus a never-claimed partition with 10 delayed jobs. For the claim, seed,
 clock (both partitions), and fallback reads it asserts the winning index
 name, no COLLSCAN or blocking SORT, covered seed/clock/fallback reads (no

@@ -192,7 +192,7 @@ cache's soft state -- from that tenant's pending jobs in that partition
 reconstructions of that vtime trade cost against robustness:
 
 - **Trailing edge** (the timeline's highest pending vstamp): cheap, and
-  self-corrects trailing job cancellation, since a cancelled top job drops the
+  self-corrects trailing job cancellation, since a canceled top job drops the
   max. Trusts the stored stamps, so correct only under
   single-writer-per-timeline.
 - **Backlog** (LWM plus the sum of the tenant's pending strides): re-derives
@@ -297,10 +297,10 @@ tenant-level FIFO rather than fair sharing.
 
 ### Cancellation and vtime
 
-A cancelled job advanced vtime at enqueue but will never dispatch, stranding
+A canceled job advanced vtime at enqueue but will never dispatch, stranding
 vtime above the tenant's real backlog. Canceled jobs at the end of the queue
 will be 'refunded' at the next reconciliation because reconstruction from the
-pending set excludes cancelled jobs. Each reconciliation re-anchors vtime to
+pending set excludes canceled jobs. Each reconciliation re-anchors vtime to
 surviving work. The vtime of canceled jobs at the head or middle of the queue
 are not recovered and the tenant will be underserved until lower vtime jobs
 are processed. Because cancellation is expected to be rare, the complexity to
@@ -452,7 +452,7 @@ A job's durable record carries a **liveness** status and, once terminal, a
 service) and **resolved** (terminal). The system collapses every terminal
 outcome into the single resolved status and records the outcome separately as
 a resolution -- supplied by the caller on complete, supplied by the queue on
-cancel (the canceller invokes a queue verb rather than reporting an outcome).
+cancel (the canceler invokes a queue verb rather than reporting an outcome).
 
 Resolution is scaffolding the queue establishes on behalf of the caller but
 does not interpret. Termination *requires* recording a resolution. Acting
@@ -506,7 +506,7 @@ advances vtime.
 A worker holding a lease **heartbeats** to push its visibility time further
 out, so a long job is not stolen mid-flight. The heartbeat extends the lease
 only while the claim id still matches; a heartbeat that fails to extend tells
-the worker its job was stolen or cancelled.
+the worker its job was stolen or canceled.
 
 The claim id is a **fence**, and its load-bearing role is to make the durable
 store reject a stale holder's *terminal* write, not merely its heartbeat. Were
@@ -602,7 +602,7 @@ Two transitions reach the resolved status, differing only in authorization:
   directly; it discovers the cancellation at its next heartbeat or terminal
   write, both of which fail the pending guard. Cancellation is therefore
   cooperative -- the worker aborts within one heartbeat interval, or its
-  terminal write is rejected and its output discarded. Because the canceller
+  terminal write is rejected and its output discarded. Because the canceler
   reports no outcome, the queue supplies cancel's resolution: a fixed
   queue-defined value marking the cancel path.
 
@@ -614,7 +614,7 @@ observability purposes.
 From the worker's vantage, a steal and a cancel are the same fence failure,
 distinguished only by what it reads back. Both land in resolved with a
 recorded resolution, and the sink's mutual exclusion guarantees a single
-winner. Cancellation is not a virtual-time event: the cancelled job leaves the
+winner. Cancellation is not a virtual-time event: the canceled job leaves the
 pending set, and reconciliation may re-anchor the tenant's vtime within one
 reconciliation interval, as described above.
 
@@ -713,7 +713,7 @@ fixed-order queue services, which can offer only native ordering or partition
 routing.
 
 **Note -- garbage collection (not a required behavior).** Neither the store nor
-the cache is self-pruning. Resolved job records (completed or cancelled,
+the cache is self-pruning. Resolved job records (completed or canceled,
 including attempt-exhausted) accumulate unless reclaimed, and the timeline
 cache map grows with every (tenant, partition) ever seen, retaining entries
 for tenants long gone idle. Neither threatens correctness -- the design tolerates both --
@@ -747,7 +747,7 @@ A model or test suite should establish:
 - **No duplication:** no job dispatches twice within the duration of a lease;
   the lease plus conditional transition admits one claimer at a time.
 - **Single resolution:** exactly one terminal write succeeds per job. A stale
-  lease holder -- stolen from or cancelled out from under -- cannot resolve the
+  lease holder -- stolen from or canceled out from under -- cannot resolve the
   job, because the fence rejects its terminal write.
 - **Memoryless placement:** a tenant that becomes backlogged in a partition
   is placed within one stride of that partition's frontier, up to the
@@ -790,7 +790,7 @@ distinguish vtime rising from real new work from vtime stranded by
 cancellation, so it squashes legitimate bursts; maintaining it between
 refreshes reintroduces the coordination the design avoids.
 
-**Refund-on-cancel.** Decrementing a tenant's vtime by a cancelled job's
+**Refund-on-cancel.** Decrementing a tenant's vtime by a canceled job's
 stride at cancel time was considered and dropped. It wanted per-cancel
 bookkeeping and, for co-located exactness, a multi-record transaction the
 contract otherwise avoids. Cancellation is expected to be rare -- a rare,
@@ -803,7 +803,7 @@ coordinating background process and its periodic global scan, at the cost of
 per-job heartbeat writes and a tuned visibility timeout. The trade favors the
 design's goal of minimal cross-node coordination.
 
-**Distinct terminal states.** Modeling completed, cancelled, and failed (and
+**Distinct terminal states.** Modeling completed, canceled, and failed (and
 timed-out, exhausted, and so on) as separate durable states -- as workflow
 engines do -- was considered and rejected for this primitive. Those engines
 branch on the terminal state: cancellation runs compensation, failure drives
@@ -849,7 +849,7 @@ any visibility*: a fully leased partition has none, and backoff retries and
 long delays pin it even in busy partitions. *Maximum leased first, then the
 rest*: finding the top lease means scanning past every unclaimed job above
 it, a cost proportional to the backlog. *Clock from resolved jobs only*: it
-lags by the in-flight window and must skip every job cancelled before claim
+lags by the in-flight window and must skip every job canceled before claim
 that is stamped above the clock. Holding the last computed value instead of
 any fallback was also rejected: in a partition that stays fully leased it
 ages without bound, a cold node has no value at all, and a newcomer seeded

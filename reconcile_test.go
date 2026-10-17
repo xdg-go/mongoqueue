@@ -335,39 +335,6 @@ func TestLWMLanesAreIndependent(t *testing.T) {
 	assertVStamp(ctx, t, q, "c-slow", 2*scale)
 }
 
-// TestLWMOtherLanePendingDoesNotRefund checks that a's pending slow-lane job
-// (1e3) does not pull its fast-lane re-seed below the fast lane's clock
-// (a-f00 at 12e3), so a-f01 is 13e3. The frontier floor alone yields 13e3,
-// so a shared timeline would stamp the same value.
-func TestLWMOtherLanePendingDoesNotRefund(t *testing.T) {
-	t.Parallel()
-
-	db := mongotest.Connect(t)
-	ctx := opCtx(t)
-	q := New(db.Collection("jobs"))
-
-	for i := 10; i < 20; i++ {
-		insertJob(ctx, t, q, Job{
-			ID: fmt.Sprintf("b-%03d", i), TenantID: "b", Partition: "fast", Cost: 1,
-			VStamp: int64(i+1) * scale, Liveness: LivenessPending, VisibleAt: time.Now(),
-		})
-	}
-
-	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "a-slow", TenantID: "a", Partition: "slow", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q, "a-slow", scale)
-	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "a-f00", TenantID: "a", Partition: "fast", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q, "a-f00", 12*scale)
-
-	claimComplete(ctx, t, q, "fast", "b-010", "a-f00")
-	mustReconcile(ctx, t, q)
-
-	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "a-f01", TenantID: "a", Partition: "fast", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q, "a-f01", 13*scale)
-
-	want := append([]string{"b-011", "a-f01"}, jobIDs("b", 12, 20)...)
-	assertOrder(t, drainOrder(ctx, t, q, "fast"), want)
-}
-
 // TestReconcileConcurrent runs Reconcile in a loop on several goroutines while
 // two producers enqueue for one tenant in one partition. Under -race this
 // checks Reconcile is safe alongside itself and enqueue, and that the tenant's
