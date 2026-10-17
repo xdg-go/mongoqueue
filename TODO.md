@@ -1,828 +1,269 @@
-# TODO: Phase 6 -- Reconciliation and Cache Lifecycle
+# TODO: Phase 7 -- Ops Hardening and Documentation
 
 Expanded from [docs/implementation-plan.md](docs/implementation-plan.md)
-Phase 6. Moves virtual-time timelines to per-(tenant, partition), bounds
-vtime-cache drift, floors new and returning tenants to each partition's
-dispatch frontier (the low-water mark, LWM), bounds cache memory, and
-settles how callers drive reconciliation. Resolves open questions #2
-(reconciliation/LWM access path) and #3 (reconciliation surface) in
-[docs/mongodb-go-library-design.md](docs/mongodb-go-library-design.md).
-Design references: "Core model" (memoryless fairness), "Two orthogonal
-axes", "Node-local cache model", "Reconciliation", "Low-water mark and the
-idle floor", "Cancellation and vtime", and the GC note under "Storage
-requirements" in
-[docs/fair-job-queue-design.md](docs/fair-job-queue-design.md).
+Phase 7. Verifies the TTL contract, reconciles the design docs against the
+code, and writes the public documentation (package godoc, a worker-pool
+example, a minimal README). Builds no new mechanism.
 
-Section 6.0 holds the decisions and contracts every subphase relies on.
-Read it before starting any subphase; do not improvise around it.
+Section 7.0 holds the decisions every subphase relies on. Read it first.
 
 ## Testing Philosophy
 
-- **Pure unit tests for cache mechanics**: per-(tenant, partition) keying,
-  invalidation, eviction, the evicted-entry retry, and LWM refresh live in
-  `vtimeCache` and are tested with fake `seedHook`/`lwmHook` functions --
-  no database.
-- **Integration tests against real MongoDB** for anything whose answer
-  comes from a query: trailing-edge re-seed, the frontier query, and
-  end-to-end dispatch order after a floor. Tests connect via
-  `internal/mongotest` (`MONGOQUEUE_TEST_URI`, default
+- **Integration tests against real MongoDB** for anything the server
+  decides: which documents carry `resolved_at`, index shapes. Tests connect
+  via `internal/mongotest` (`MONGOQUEUE_TEST_URI`, default
   `mongodb://localhost:27017`).
 - **Hermetic tests**: each test uses a uniquely named database/collection
-  (random suffix) so parallel runs never collide; drop on cleanup.
-- **Exact assertions**: vstamps are integer arithmetic (`stride =
-  max(1, cost*scale/weight)`, `scale = 1_000` since 6.5), ties break by `_id`. Assert exact
-  vstamps and exact dispatch sequences, never ratios.
-- **Concurrency tests**: every outcome a race test accepts also has a
-  deterministic, sequenced test that forces it. Race tests run under
-  `-race`, log the outcome distribution, and assert only the invariant.
-- **Control time through data, not a clock**: no sleeps, no tickers in
-  tests. Tests call reconcile directly. Make a job invisible by writing
-  `visible_at` into the future (or claiming it with a one-minute lease);
-  make it visible by writing `visible_at` into the past.
-- **Fixtures carry a partition**: the seed filter and the frontier filter
-  both name a partition, so every `insertJob`/`seedDoc` fixture sets
-  `Partition` explicitly (`defaultPartition` for unpartitioned tests);
-  `insertJob` does not normalize an empty partition.
+  (random suffix) so parallel runs never collide; drop on cleanup. Never
+  change server-wide parameters (no `setParameter`).
+- **Trust the server's TTL monitor**: test the index shape and the document
+  shapes it acts on, not the deletion itself. No test waits on the monitor.
+- **Control time through data, not a clock**: no sleeps. Expire a lease or
+  end a delay by writing `visible_at` into the past.
+- **Examples compile, they do not run**: examples need a server, so they
+  carry no `// Output:` comment and `go vet` checks them. Behavior they show
+  is covered by existing tests.
+- **Doc-only changes need no test.** A reconciliation finding that exposes
+  untested behavior gets a test (or a recorded follow-up), not a doc edit
+  alone.
 
-Test what new code changes. Enqueue validation, stride arithmetic, claim
-ordering, and the Phase 3 cold-start seed query are already covered. Use
-them as fixtures; don't retest them. The Phase 5 fairness tests change
-where 6.0 says they change, and nowhere else.
+Test what new code changes. Lifecycle, fencing, fairness, frontier, and
+reconcile behavior are already covered; don't retest them.
 
 ## Verification Checklist
 
 Before marking a subphase complete and committing it:
 
 1. `go build ./...` and `make vet` pass
-2. `make test` passes (including integration tests against Mongo); run the
-   race tests with `go test -race ./...`
+2. `make test` passes (including integration tests against Mongo)
 3. `make lint` clean (config in `.golangci.yml`)
 4. New exported identifiers have godoc comments
-5. Design docs updated in the same commit when the subphase settles a
-   decision the docs left open (each subphase names its doc task)
+5. Every `docs/` file added or removed is reflected in the AGENTS.md
+   documentation index in the same commit
 
 When verification of a subphase is complete, commit all relevant
-newly-created and modified files as one logical unit.
+newly-created and modified files as one logical unit. `REVIEW.md` is
+gitignored and is never committed.
 
 ## Dependencies Between Subphases
 
 ```
-6.0 Decisions and contracts (read first)
+7.0 Decisions (read first)
+       │
+       ├─► 7.1 TTL shape test (independent)
        │
        ▼
-6.1 Per-(tenant, partition) timelines: cache key, seed query, seed index
+7.2 Reconciliation: forward pass (both design docs)
        │
        ▼
-6.2 Reconcile: invalidate, evict, re-seed from trailing edge
+7.3 Reconciliation: reverse pass, invariants, rejected alternatives
        │
        ▼
-6.3 LWM: per-partition frontier, cold-seed refresh, idle floor
+7.4 Reconciliation: plan, AGENTS.md, open questions, deferred lists
        │
        ▼
-6.4 Public surface and docs
+7.5 Deviation review with the user (REVIEW.md, one by one)
        │
        ▼
-6.5 Review follow-ups (leased fallback, SCALE 1e3, Reconcile errors)
-       │
-       ▼
-6.6 Service-clock frontier and partial indexes (supersedes 6.3/6.5 rule)
+7.6 Package godoc ──► 7.7 Worker-pool example ──► 7.8 README
 ```
 
-Strictly sequential: 6.2 keys its walk on 6.1's entries, 6.3 extends the
-reconcile pass 6.2 builds, and 6.4 exports what 6.1-6.3 built.
+Docs come after reconciliation so godoc and README describe the model the
+code implements. 7.5 may produce code or doc changes of its own; each
+decided deviation is its own commit.
 
 ---
 
-## 6.0 Decisions and Contracts
+## 7.0 Decisions (2026-10-17)
 
-### D1 (decided 2026-10-12): memoryless fairness, per-partition frontier, per-(tenant, partition) timelines
+- **TTL: shape, not deletion.** The TTL monitor runs every 60s; testing
+  actual deletion needs a sleep or a server-wide `ttlMonitorSleepSecs`
+  change. The queue's obligation is that `resolved_at` exists exactly on
+  resolved jobs and the index is a TTL index on it; the server does the
+  rest. `resolved_at` is `omitempty`, and that matters: a stored zero
+  `time.Time` would be year 1 and the TTL monitor would delete the pending
+  job on its next pass.
+- **Observability: build nothing.** `stamped_by` is wired and tested
+  (`enqueue_test.go`, `TestEnqueue...` asserting `node-under-test`). No
+  metrics, stats returns, or hooks; callers query the collection.
+  `claimed_by`/`ClaimOpts` stays a documented future option.
+- **Open question #1 (`Mux`): deferred and closed.** It sits above the
+  primitive. Move it to the deferred list; the Open Questions section keeps
+  one-line pointers.
+- **Deviations go to `REVIEW.md`.** When the code and a doc disagree on
+  behavior (not just wording), record it in a fresh `REVIEW.md` and change
+  neither side. The user reviews deviations one by one in 7.5.
+- **README: minimal.** For GitHub visitors: badges, a short pitch, install
+  line, links. Usage rules live in godoc.
+- **Tagging is separate.** No release or tag in this phase.
 
-**Fairness is memoryless.** Capacity in a partition divides among tenants
-with pending work there by their present weights. Past idleness earns no
-credit and incurs no penalty. Within a tenant, dispatch is FIFO. Across
-tenants, already-enqueued work is slowed by another tenant's arrival,
-never jumped: a tenant that becomes backlogged is placed one stride past
-the job the partition will serve next, exactly as if it had been active
-all along and had just finished its previous work. The floor sets where a
-returning tenant *starts*; its stride sets its *share* from then on, so a
-returning tenant that floods interleaves with incumbents at its weighted
-share from its first job.
+### Reconciliation method
 
-**The LWM is the dispatch frontier of a partition**: the minimum vstamp
-among that partition's visible pending jobs (`partition`, `liveness:
-pending`, `visible_at <= $$NOW`), i.e. the vstamp the next claim in that
-partition would take. Visibility filtering matters: a leased or delayed
-low-vstamp job must not pin the floor, or every newcomer would inherit
-stale credit.
+The code is the presumed reference: phases 3-6 changed the design as they
+went and the docs were patched along the way. Every gap is classified
+before anything is edited.
 
-**Timelines are per (tenant, partition).** Each partition is an
-independent fair queue over the tenants enqueueing into it. The cache key,
-the trailing-edge seed, the single-writer obligation, and the weight
-consistency obligation are all per (tenant, partition). A tenant's load in
-one partition does not move its position in another. The public API does
-not change; `EnqueueOpts.Partition` already names the partition.
+| Verdict | Meaning | Action |
+|---|---|---|
+| **doc lags** | Doc states an older or vaguer version of what the code does, and the code's behavior is the decided one | Fix the doc in this subphase |
+| **code deviates** | Code does something the docs don't sanction, or the doc's rule is the decided one | Record in `REVIEW.md`; touch nothing |
+| **untested** | Code and doc agree, no test proves it | Add a test, or record in `REVIEW.md` as a follow-up |
+| **undecided** | Neither side settles it | Add to Open Questions |
 
-Rejected, recorded in the design doc's "Rejected alternatives":
-- *Min active trailing edge* (the design doc's former definition): places a
-  newcomer behind the shallowest active backlog; contradicts the doc's own
-  "idealized fair server" sentence.
-- *Idle credit* (no floor, or `frontier - k strides`): unbounded, or a knob
-  with little latency gain since the frontier already places a sparse
-  tenant's job within one stride of the front.
-- *One global frontier over a shared tenant timeline*: stale credit bounded
-  only by the spread between lane frontiers, and trailing-edge re-seed
-  forgets a tenant's fast-lane consumption whenever it has a slow-lane job
-  pending.
-- *Per-partition floors on a shared timeline*: a reserve into a hot lane
-  drags the tenant's single vtime up, burying its work in cooler lanes
-  behind backlog it never consumed.
-- *Monotone hold* (`lwm = max(lwm, computed)`): protected a multi-query,
-  non-snapshot computation from dips. The per-partition frontier is one
-  query, and memoryless says the floor tracks the actual service point,
-  dips included. The LWM for a partition is simply its last computed
-  frontier; a computation that finds no visible job leaves the prior
-  value (initially 0). A refresh that finishes late may overwrite a
-  newer one with an older, lower value; accepted as a bounded dip and
-  documented, not sequenced (decided 2026-10-13). When every pending job
-  is leased or delayed, keeping the prior value floors a new tenant above
-  them at the old frontier; that is intended. A partition's stored LWM
-  is dropped when the walk evicts its last cached timeline, so a stale
-  value never outlives the partition's cache presence.
+When unsure whether a gap is "doc lags" or "code deviates" (e.g. the doc
+describes a deliberate rule and the code is simpler), it is a deviation.
 
-### D2: reconciliation is lazy invalidation, not eager rewrite
-
-Reconcile does **not** query each timeline and write the result into the
-cache. It (1) refreshes the LWM of every partition present in the cache
-(6.3), then (2) walks the cache: an entry touched since the previous
-reconcile is **invalidated** (marked stale, which clears `seeded` at its
-next reserve), so the timeline's next reserve re-runs the seed under its
-own lock; an entry untouched since the previous reconcile is **evicted**.
-
-Why: the seed already runs under the entry lock, after every prior insert
-for that timeline on this node has been acknowledged, so -- given the read
-requirement in "Seed reads from the primary" below -- it can never read a
-trailing edge older than a stamp this node issued. An eager rewrite would
-run the query outside the entry lock and need a commit-epoch fence to
-avoid lowering vtime below a concurrently inserted job. Lazy invalidation
-has no such race. The cost is one indexed `FindOne` (the existing seed
-query, served by the seed index) on each active timeline's first enqueue
-after each reconcile, paid on the enqueue path.
-
-Consequences an implementer must preserve:
-- A seed failure fails that enqueue (existing behavior,
-  `TestVtimeCacheSeedErrorRetries`). A reconcile that fails to refresh any
-  LWM returns its error and does **no invalidation and no eviction**.
-  Partitions refreshed before the failure keep their new LWM (decided
-  2026-10-13: harmless, the LWM is only a floor; no all-or-nothing
-  commit).
-- Re-seeding sets vtime to `max(trailing edge, lwm[partition])` where
-  trailing edge is 0 when the timeline has no pending jobs. This one rule
-  covers restart, trailing-cancellation refund (the edge drops),
-  external-writer drift (the edge rises), and drained/returning tenants
-  (no edge, so LWM).
-- **Open question #2 answer**: reconciliation adds no index. The
-  trailing edge is the seed query on the seed index
-  `{tenant: 1, partition: 1, liveness: 1, vstamp: -1}` (6.1 adds
-  `partition`); the frontier reads the claim index with the claim filter
-  (6.3).
-
-### D3: the surface is caller-driven, and cold seeds refresh the floor
-
-Open question #3 answer: `func (q *Queue) Reconcile(ctx context.Context)
-error`, exported in 6.4. No internal goroutine, no `Close`, no interval
-option -- `New` stays I/O-free and goroutine-free. The caller runs
-`Reconcile` on a ticker; the godoc example shows the loop.
-
-A **cold seed** (a reserve that creates a new cache entry) refreshes the
-LWM for its partition before seeding, so the floor is correct for a new or
-evicted tenant even on a node that never reconciles. The cost is one extra
-indexed read on a rare event. A **re-seed** (a stale entry after a walk)
-uses the LWM the reconcile stored; it does not query the frontier again.
-A caller that never calls `Reconcile` therefore still floors newcomers
-correctly, but cache drift for active timelines is never corrected and
-the cache map never shrinks. Godoc states that.
-
-### Cache state and locking
-
-The cache map is keyed by `timelineKey{tenant, partition string}`
-(partition already normalized to `defaultPartition` when empty). Each
-entry (`tenantVtime`, renamed `timeline` if that reads better; keep the
-diff small) gains three fields:
-- `touched atomic.Bool` -- set by every `reserve` (seeded or not); cleared
-  by the walk.
-- `stale atomic.Bool` -- set by the walk; `reserve`, holding the entry
-  lock, does `if t.stale.Swap(false) { t.seeded = false }` before its seed
-  check. This is how invalidation reaches `seeded` without the walk taking
-  the entry lock.
-- `evicted bool` -- guarded by the entry's `mu`; set once, by eviction,
-  before the entry leaves the map.
-
-Lock order is **global `mu` → entry `mu` → `lwmMu`**. Only eviction takes
-global then entry; only the seed path takes entry then `lwmMu`. Never
-acquire in the reverse direction. `reserve` releases the global lock before
-taking the entry lock; keep it that way. No I/O is ever performed while
-holding the global lock or `lwmMu`.
-
-The cache walk takes the global lock and, for each entry:
-- if `touched.Swap(false)` returned true: `stale.Store(true)` (invalidate);
-- else `TryLock` the entry; on success delete it from the map, set
-  `evicted = true`, unlock. On failure (an in-flight reservation, which
-  will set `touched`), `stale.Store(true)` and move on.
-
-The walk never blocks on an entry lock, so a slow insert for one timeline
-cannot stall reconcile for others, and it does no I/O under the global
-lock.
-
-**Reconcile is not atomic.** Between `refreshLWM` publishing a new floor
-and the walk marking an entry stale, a reserve for an already-seeded entry
-still uses its old base. The new floor and re-seed take effect at each
-entry's first reserve after the walk. An entry is evicted on the second
-consecutive walk that finds it untouched, so an idle entry lives up to two
-reconcile intervals plus walk time.
-
-`reserve` must handle an entry evicted between its map lookup and its
-entry lock: after `t.mu.Lock()`, if `t.evicted`, unlock and redo the
-lookup (which creates a fresh entry). Without this, a goroutine stamping
-on an orphaned entry and another stamping on its replacement would be two
-writers for one timeline inside one process. Factor the
-lookup-lock-retry loop into `lockTimeline(key) *tenantVtime`, and give
-`vtimeCache` an unexported test seam `afterLookup func(key timelineKey)`
-(nil in production) called between the map lookup and `t.mu.Lock()`, so a
-unit test can run an eviction at exactly that point.
-
-### LWM state
-
-The LWM lives in `vtimeCache`, beside the seed hook it feeds:
-- `lwmHook func(ctx, partition string) (lwm int64, ok bool, err error)` --
-  wired by `New` to `q.computeLWM`; `ok == false` means no visible pending
-  job in that partition. Nil means LWM is always 0 (pure-unit
-  configuration, as with `seedHook`).
-- `lwm map[string]int64` guarded by a dedicated `lwmMu` (not the global
-  map lock). A missing key reads as 0.
-- `refreshLWM(ctx, partition) error`: call the hook *without* holding
-  `lwmMu`, then under it store the value when `ok` (plain overwrite, no
-  max); `ok == false` leaves the stored value. A hook error is returned
-  and nothing is stored.
-- `lwmFor(partition) int64`: read under `lwmMu`.
-
-`reserve`'s seed branch distinguishes the two seed paths:
-- **Cold seed** (entry just created, `seeded == false` and never set):
-  `refreshLWM(ctx, partition)` first; an error fails the reserve exactly
-  like a seed error, and the entry stays unseeded so the next reserve
-  retries. Then seed hook, then `vtime = max(edge, lwmFor(partition))`.
-- **Re-seed** (`stale` applied): seed hook, then
-  `vtime = max(edge, lwmFor(partition))`. No frontier query.
-
-Put the `max` in `reserve`'s seed branch (seed hook result vs `lwmFor`),
-so the seed hook stays the plain trailing-edge query and both are
-unit-testable with fakes. Between reconciles the LWM does not change and
-every entry re-seeds after a reconcile, so a floor at seed time is
-equivalent to a floor on every reserve; do not add a second floor in
-`reserve`.
-
-### Seed reads from the primary
-
-`seedTenantVtime` currently reads through `q.coll`, which inherits the
-caller's read preference. A secondary read can return a trailing edge older
-than a stamp this node issued, and periodic re-seeding makes that a
-recurring risk rather than a one-time cold-start one. Switch it (and the
-frontier query) to `q.primary`. This is the only read-side change to the
-seed query besides the `partition` filter 6.1 adds.
-
-Primary routing is necessary but not sufficient: with `w: 1` writes and a
-collection read concern of `"majority"`, an acknowledged insert can be
-missing from the majority snapshot the seed reads, and the re-seed reissues
-its stamp. Per AGENTS.md ("documented, not defended"), add this to `New`'s
-godoc and the mongodb design doc as a caller requirement -- seed reads must
-observe the queue's own acknowledged inserts (e.g. default `"local"` read
-concern, or `w: "majority"` with `"majority"` reads). Do not detect or
-override read concern.
-
-### Known effect: dispatched top-of-backlog lowers the edge
-
-Within one (tenant, partition) timeline, the highest-vstamp job can
-dispatch before lower ones only when the lower ones are delayed or leased.
-Once it resolves, the trailing edge drops below it, and the timeline's
-next job can be stamped *below* an already-dispatched job. This is a
-small, bounded over-service the trailing-edge design accepts, and it is
-confined to one partition now that timelines are per partition. Do not
-write a test asserting that new stamps exceed every stamp the timeline
-ever had; the invariant is **a new stamp exceeds every pending stamp on
-its timeline**.
-
-### Expected changes to existing tests
-
-Per-partition timelines (6.1) and cold-seed LWM refresh (6.3) change the
-expected values of some Phase 5 tests. These changes are the behavior the
-design now specifies; make them exactly as listed, and update each test's
-comment to state the rule it now proves. **Any existing test not listed
-here that fails after a subphase is a regression. Stop and report it; do
-not edit its expectations.**
-
-After 6.1 (timelines per partition; no LWM yet):
-- `TestFairnessPartitionScoped`: its stated purpose inverts. It now proves
-  a tenant's timeline is per partition: `a-004` in `p2` seeds fresh at
-  `1e6`, not at a's `p1` vtime. Expected `p2` order `[a-004, b-000]`
-  (tie at `1e6`, `a-` first); `p1` order `[a-000, b-001, a-001, a-002,
-  a-003]` (`b-001` seeds fresh at `1e6`, ties `a-000`). 6.3 changes `p1`
-  again (below).
-- `TestEnsureIndexesCreatesClaimAndSeedIndexes`: seed index keys become
-  `{tenant: 1, partition: 1, liveness: 1, vstamp: -1}`.
-- `TestColdStartSeed`: `seedRecord` gains `Partition` (the seed filter
-  names it) and the seed call passes the partition. Assertions unchanged.
-- `vtimecache_test.go`: `reserve` and the fake `seedHook` take a
-  partition; assertions unchanged.
-
-After 6.3 (cold seeds refresh the partition's frontier):
-- `TestFairnessFloodingTenant`: b's cold seed finds a's frontier at `1e6`,
-  so `b-00k` is stamped `(k+2)e6` and ties `a-(k+1)`. Expected order:
-  `a-000`, then for `i = 1..49`: `a-i` followed by `b-(i-1)` while
-  `i <= 5`. The comment keeps its claim (B interleaves from its first
-  job) and adds that B joins one stride past the service point.
-- `TestFairnessWeightTwoToOne`: b's cold seed finds a's frontier at
-  `0.5e6`, so `b-k` is stamped `(k+1.5)e6`. Both tenants have work
-  through the first 44 claims; every `3k` prefix with `3k <= 42` holds
-  exactly `2k+1` A jobs (A's extra one is the half-stride head start the
-  floor gives the incumbent). Keep `expectedOrder` for the full sequence
-  with b planned from base `0.5e6`.
-- `TestFairnessCheapVsExpensive`: b's cold seed finds a's frontier at
-  `1e6`, so B is stamped `5e6, 9e6, 13e6, 17e6, 21e6`. Give `planTenant` a
-  base-vstamp parameter (or a sibling helper) rather than hand-writing the
-  list.
-- `TestFairnessPartitionScoped`: `b-001`'s cold seed in `p1` finds the
-  frontier `1e6`, so `b-001 = 2e6` and `p1` is `[a-000, a-001, b-001,
-  a-002, a-003]`; `b-000`'s cold seed in `p2` finds `a-004` at `1e6`, so
-  `b-000 = 2e6` and `p2` stays `[a-004, b-000]`.
-- `TestRaceFairnessConcurrentTenants`: with concurrent cold seeds the
-  second tenant's floor depends on the race, so the order is no longer
-  fixed. Enqueue `a-000` then `b-000` sequentially before starting the
-  goroutines (`b-000 = 2e6`), then race `a-001..a-049` and
-  `b-001..b-049`. Expected order: `a-000`, then `a-k, b-(k-1)` for
-  `k = 1..49`, then `b-049`.
-- `TestColdStartSeed`: switch fixtures to full `Job` records via
-  `insertJob` with `Partition: defaultPartition` and `VisibleAt` an hour
-  in the future, so the frontier query deliberately finds nothing
-  (`ok == false`, LWM 0) and the test keeps asserting the seed alone.
-  Assertions unchanged.
-- `TestClaimOrdersByVStampThenID`: the three new tenants' cold seeds find
-  `a-costly`'s frontier at `10e6`, so they no longer tie at `1e6`. The
-  test is about claim ordering, not stamping: insert all four fixtures
-  via `insertJob` (full `Job` records, `Partition: defaultPartition`) at
-  fixed vstamps (`a-costly` `10e6`; `z-cheap`, `tie-b`, `tie-a` `1e6`).
-  Assertions and the comment's claims unchanged.
-- `TestFairnessSingleTenant`, `TestFairnessSameTenantCostNoReorder`: one
-  tenant into an empty partition; unchanged.
+`REVIEW.md` layout: a **Deviations** section (numbered; each with doc
+location, code location, what each says, a concrete scenario where they
+differ, and a recommendation) and a **Worksheet** appendix holding the
+claim-by-claim pass (statement, doc location, code location, test,
+verdict). The worksheet lives there, not in a session scratchpad, so it
+survives across sessions.
 
 ---
 
-## 6.1 Per-(tenant, partition) Timelines
+## 7.1 TTL Shape Test
 
-Cache key, seed query, and seed index move to (tenant, partition). No
-reconcile, no LWM yet.
-
-### 6.1.1 Cache key (`vtimecache.go`)
-- [x] `timelineKey{tenant, partition string}`; `tenants map[string]` →
-  `map[timelineKey]*tenantVtime`; `reserve(ctx, tenant, partition, cost,
-  weight)`; `seedHook(ctx, tenant, partition)`
-- [x] `enqueue` passes `n.partition` (the normalized value that is stored)
-- [x] Update the `vtimeCache` doc comment: timelines are per (tenant,
-  partition); the strictly-increasing invariant is per timeline
-- [x] **Test** (unit): one tenant, two partitions -- reserve+commit twice
-  in each; vstamps are `1,2` in both partitions (independent timelines);
-  the fake seed hook is called once per (tenant, partition)
-- [x] **Test**: existing `vtimecache_test.go` tests pass with the new
-  signatures
-
-### 6.1.2 Seed query and index (`queue.go`)
-- [x] `seedTenantVtime(ctx, tenant, partition)`: filter adds `partition`;
-  read via `q.primary`; doc comment rewritten (drop "Phase 6 supersedes
-  it"; describe the re-seed cycle to come, and the read-concern caveat)
-- [x] Seed index becomes `{tenant: 1, partition: 1, liveness: 1,
-  vstamp: -1}` in `EnsureIndexes` and its doc comment
-- [x] Add the read-concern caller requirement to `New`'s godoc (6.0)
-- [x] **Test**: `TestColdStartSeed` -- fixtures gain `Partition`; add a
-  pending record for the same tenant in another partition at a higher
-  vstamp and assert it does not raise the seed
-- [x] **Test**: `TestEnsureIndexesCreatesClaimAndSeedIndexes` expected
-  keys updated; explain check that the seed query uses the new index
-  (`IXSCAN`, no blocking `SORT`), recorded in the mongodb design doc
-- [x] **Test**: `TestFairnessPartitionScoped` rewritten per 6.0 (6.1
-  values); comment states the rule it now proves
-- [x] **Doc**: mongodb design doc -- seed index keys and the
-  per-(tenant, partition) seed; generic design doc -- confirm the 6.0 D1
-  wording landed in "Core model", "Two orthogonal axes", "Node-local cache
-  model", and "The conserved single-writer requirement" (the drafts were
-  written with D1; fix anything the implementation contradicts); AGENTS.md
-  "Node-local cache" bullet
+- [ ] **Test**: `TestResolvedAtOnlyOnResolvedJobs` -- drive one job each
+  through: enqueued (pending, never claimed), delayed, claimed,
+  heartbeated, released, lease-expired (claim, then write `visible_at`
+  into the past), completed, canceled before claim, canceled while
+  claimed. Read each raw document (`bson.Raw`, not `Job`, so a zero time
+  cannot hide) and assert `resolved_at` is absent for the pending six and
+  a BSON date for the resolved three
+- [ ] Confirm `EnsureTTLIndex` godoc states the `omitempty` dependency
+  (pending jobs omit the field, so the TTL monitor skips them); add one
+  sentence if missing
+- [ ] Mark 7.1 done in `docs/implementation-plan.md`
 
 ---
 
-## 6.2 Reconcile: invalidate, evict, re-seed
+## 7.2 Reconciliation: Forward Pass
 
-No LWM yet: `reconcile` skips the LWM step until 6.3 adds it, and the
-seed is still `max pending or 0`.
+For each normative statement -- rules, field names, query shapes, index
+keys and partial filters, error names, lifecycle transitions, caller
+obligations -- find the code that implements it and the test that proves
+it. Record every statement in the `REVIEW.md` worksheet.
 
-### 6.2.1 Cache mechanics (`vtimecache.go`)
-- [x] Add `touched`, `stale` (both `atomic.Bool`) and `evicted` to the
-  entry; `reserve`, holding the entry lock, sets `touched` and applies
-  `stale` to `seeded` per 6.0
-- [x] Factor lookup-lock-retry into `lockTimeline(key) *tenantVtime` with
-  the `afterLookup` test seam (6.0); `reserve` uses it
-- [x] `(*vtimeCache).invalidateAndEvict()` implementing the walk in 6.0
-  (no I/O, never blocks on an entry lock, returns nothing)
-- [x] Update the `vtimeCache` and `seedHook` doc comments: describe the
-  re-seed-after-reconcile cycle, the two-walk eviction lifetime, and the
-  lock order
-- [x] **Test**: touched entry is invalidated -- reserve+commit, walk, next
-  reserve calls `seedHook` again and stamps from the new seed (fake hook
-  returning a different value the second time)
-- [x] **Test**: untouched entry is evicted -- reserve+commit, walk (clears
-  `touched`, marks stale), walk again: entry gone from the map; next
-  reserve creates a fresh entry and seeds
-- [x] **Test**: busy entry is not evicted, and the walk does not block --
-  reserve+commit, walk (clears `touched`). Then, from one goroutine, call
-  `lockTimeline` directly and hold the entry lock without setting
-  `touched` (simulating the window before `reserve` sets it). Run a walk
-  on the test goroutine: it returns while the lock is still held, the
-  entry is still in the map, and `stale` is set. Release the lock; the
-  next reserve re-seeds. Order steps with channels, not sleeps.
-- [x] **Test**: evicted-entry retry -- set `afterLookup` to run a walk that
-  evicts the entry (pre-clear `touched` with an earlier walk); assert the
-  reserve lands on a fresh map entry (seed hook called again), the orphan
-  has `evicted == true`, and the resulting vstamp comes from the new seed,
-  not the orphan's vtime
-- [x] **Test**: race -- 2 goroutines per timeline × 2 timelines × 100
-  reserve+commit each, while a fifth goroutine calls the walk in a loop.
-  The fake seed hook returns the timeline's current durable maximum, which
-  the test tracks under a mutex and updates **after reserve and before
-  Commit** (mirroring insert-before-commit). Assert each timeline's
-  committed vstamps are exactly `{1..200}×stride`, no duplicates. Log
-  eviction and invalidation counts.
+### 7.2.1 `docs/fair-job-queue-design.md`
+- [ ] Walk every section in order. Storage-agnostic statements still map
+  to code: e.g. "Release clears the claim id" → `lease.go` + test
+- [ ] Fix every **doc lags** finding; record the rest
+- [ ] Watch for stale vocabulary: "per-tenant" vtime, "min visible",
+  "leased fallback", "trailing-edge LWM", "monotone hold", SCALE 1e6,
+  "claim index" with `liveness`/`claim_id` keys
 
-### 6.2.2 Queue-level reconcile (`queue.go`)
-- [x] Unexported `(q *Queue) reconcile(ctx) error`: calls
-  `q.vtimes.invalidateAndEvict()` and returns nil (6.3 adds the LWM step
-  ahead of it)
-- [x] **Test**: trailing cancellation is refunded. Isolate the tenants in
-  their own partitions so the values survive 6.3's cold-seed refresh:
-  (1) tenant `b` in partition `pb` enqueues `b-000`..`b-002`
-  (`1e6..3e6`), `Cancel(b-002)`, enqueue `b-003`: `4e6` (no reconcile;
-  cached vtime is unaffected by cancel). (2) tenant `a` in partition `pa`
-  enqueues `a-000`..`a-002` (`1e6..3e6`), `Cancel(a-002)`, `reconcile`,
-  enqueue `a-003`: `3e6` (edge `2e6` + stride). Under 6.3 the frontier of
-  `pa` at reconcile is `1e6`, below `a`'s edge, so the value holds.
-- [x] **Test**: external-writer drift is corrected -- enqueue `a-000`
-  (`1e6`), `insertJob` a full pending `Job` for tenant `a` at vstamp
-  `50e6` (`Partition: defaultPartition`, another writer's stamp),
-  `reconcile`, enqueue: `51e6`. A second `insertJob` for `a` at `90e6` in
-  partition `other` must not affect the default-partition stamp.
-- [x] **Test**: idle timeline is evicted end to end -- enqueue for tenant
-  `a`, `reconcile` twice with no enqueue between; `a`'s key is absent from
-  `q.vtimes.tenants`
-- [x] **Doc**: design doc "Reconciliation" -- confirm the lazy-invalidation
-  paragraph (D2) and the eviction rule match the implementation; mongodb
-  doc open question #2 -- record the answer (no new index; seed index
-  serves the trailing edge; frontier access path pending 6.3)
+### 7.2.2 `docs/mongodb-go-library-design.md`
+- [ ] Walk every section in order; check field names and BSON tags
+  against `job.go`, query filters/sorts/projections against `claim.go`,
+  `queue.go`, `resolve.go`, `lease.go`, index specs against
+  `EnsureIndexes`, errors against `errors.go`
+- [ ] The pre-2026-10-17 explain checks: confirm each is labeled
+  historical and none is cited as current behavior
+- [ ] Fix every **doc lags** finding; record the rest
 
 ---
 
-## 6.3 LWM: Per-Partition Frontier and Idle Floor
+## 7.3 Reconciliation: Reverse Pass, Invariants, Rejected Alternatives
 
-### 6.3.1 Frontier query (`queue.go`)
-- [x] `(q *Queue) computeLWM(ctx, partition string) (int64, bool, error)`
-  reading `q.primary`: one `FindOne` with the **claim filter**
-  (`partition`, `liveness: pending`, `$expr: {$lte: ["$visible_at",
-  "$$NOW"]}`), sort `{vstamp: 1, _id: 1}`, projection `{vstamp: 1}`;
-  `ok = false` on `ErrNoDocuments`
-- [x] Explain check, recorded in the mongodb design doc next to the claim
-  explain check: expect the claim plan (`IXSCAN` on the claim index, no
-  blocking `SORT`, one document fetched). Include keys examined with a
-  leased prefix, as the claim check did, and for a partition whose pending
-  jobs are all invisible (the scan walks the partition's whole pending
-  range in the index and returns nothing).
-- [x] **Stop rule**: if the plan is a `COLLSCAN` or needs a blocking
-  `SORT`, stop and report the explain output. Do not add an index without
-  user approval -- an index on the enqueue/resolve write path is a
-  write-amplification decision (open question #2).
-- [x] **Test**: `computeLWM` -- partition `p1` with visible pending jobs
-  at `7e6` and `4e6`; a leased job at `1e6` (`insertJob` with a `ClaimID`
-  and `VisibleAt` a minute ahead -- the stored shape of a lease), a
-  delayed job at `2e6` (`VisibleAt` an hour ahead), and a resolved job at
-  `3e6` are all excluded; a visible job at `1e6` in partition `p2` is
-  ignored: result for `p1` is `(4e6, true)`, for `p2` `(1e6, true)`, for
-  an empty partition `(0, false)`. All fixtures are full `Job` records
-  with an explicit `Partition`.
-
-### 6.3.2 Floor in the cache (`vtimecache.go`, `queue.go`)
-- [x] Add `lwmHook`, `lwm`, `lwmMu`, `refreshLWM`, `lwmFor` per 6.0; `New`
-  wires `lwmHook = q.computeLWM`
-- [x] `reserve` seed branch: cold seed refreshes the partition's LWM first;
-  both seed paths take `max(edge, lwmFor(partition))` (6.0 "LWM state")
-- [x] `reconcile` snapshots the set of partitions present in the cache
-  (under the global lock, no I/O), calls `refreshLWM` for each, and on
-  the first error returns it wrapped and skips the walk
-- [x] Rework `TestColdStartSeed` fixtures per 6.0 (assertions unchanged)
-- [x] Update the Phase 5 tests listed under 6.0 "After 6.3", exactly as
-  listed, with comments stating the rule each now proves
-- [x] **Test** (unit): cold seed refreshes -- first reserve for `(a, p1)`
-  calls `lwmHook("p1")` once; first reserve for `(b, p1)` calls it again;
-  first reserve for `(a, p2)` calls `lwmHook("p2")`; a re-seed after a
-  walk does not call `lwmHook`
-- [x] **Test** (unit): cold-seed hook failure fails the reserve and is not
-  memoized -- hook fails once, reserve fails, next reserve retries and
-  succeeds
-- [x] **Test** (unit): tracks the frontier, no hold -- `refreshLWM("p")`
-  with the hook returning `10e6`, then `6e6`, then `(0, false)`: `lwmFor`
-  reads `10e6`, `6e6`, `6e6`
-- [x] **Test** (unit): seed takes the max -- seed hook `3e6`, LWM `10e6`
-  → first vstamp `10e6 + stride`; seed hook `12e6`, LWM `10e6` →
-  `12e6 + stride`
-- [x] **Test** (unit): failed refresh leaves the cache untouched -- touched
-  entry stays seeded after a `reconcile` whose `lwmHook` fails for one of
-  two partitions
-- [x] **Test**: idle tenant resumes at the frontier, not stale vtime and not
-  buried -- one Queue, default partition. Tenant `a` enqueues
-  `a-000`..`a-002` (`1e6..3e6`); claim and complete all three (`a`
-  drained, cached vtime `3e6`). Tenant `b` enqueues `b-000`..`b-019`: its
-  cold seed finds no visible job (`a` is drained), so `b` is stamped
-  `1e6..20e6`; claim and complete `b-000`..`b-009`. Frontier is now
-  `11e6`. `reconcile`. Tenant `a` enqueues `a-003`: vstamp `12e6`. Drain
-  with `drainOrder`: `b-010, a-003, b-011, ..., b-019` (`a-003` ties
-  `b-011` at `12e6`; `a-` < `b-`). Stale credit would stamp `a-003` at
-  `4e6`; the trailing-edge LWM would stamp it at `21e6`.
-- [x] **Test**: returning tenant that floods interleaves at its share
-  (memoryless) -- same setup through `reconcile`, then `a` enqueues
-  `a-003`..`a-022` (`12e6..31e6`). Drain: `b-010`, then `a-003, b-011,
-  a-004, b-012, ..., a-011, b-019`, then `a-012`..`a-022`. `b` drains at
-  claim 19, `a` at claim 30. Comment: the floor sets where `a` starts; the
-  stride sets its share.
-- [x] **Test**: cold node floors a new tenant -- Queue 1 enqueues `b-000`
-  ..`b-019` and claims+completes 10; Queue 2 (fresh, same collection,
-  Queue 1 discarded) enqueues new tenant `c`: vstamp `12e6` (its cold seed
-  refreshes the frontier; no `reconcile` is called on Queue 2)
-- [x] **Test**: lanes are independent -- tenant `b` enqueues 20 jobs in
-  partition `slow` (none claimed; frontier `1e6`) and 20 in partition
-  `fast` (claim+complete 10; frontier `11e6`). Tenant `c` enqueues one job
-  in `fast`: `12e6`; then one in `slow`: `2e6`. A shared timeline would
-  have stamped the `slow` job `13e6`.
-- [x] **Test**: a pending job in one lane does not refund consumption in
-  another -- `insertJob` pending visible jobs for tenant `b` in `fast` at
-  `11e6..20e6`. Tenant `a` enqueues `a-slow` in `slow` (`1e6`) and
-  `a-f00` in `fast` (cold seed finds frontier `11e6`: `12e6`). Claim
-  `fast` twice (`b-010`, `a-f00`) and complete both. `reconcile`. `a`
-  enqueues `a-f01` in `fast`: `13e6` (edge none, LWM `12e6`). Drain
-  `fast`: `b-011, a-f01, b-012, ..., b-019`. Under a shared timeline the
-  re-seed would have landed on `a-slow`'s `1e6` and stamped `a-f01` at
-  `2e6`.
-- [x] **Test**: extend 6.2.1's race test with an `lwmHook` returning
-  `(0, true)` and the walk loop calling `refreshLWM` for both partitions
-  before each walk; contiguity `{1..200}×stride` must still hold. (A
-  nonzero floor would legitimately shift the first stamp, so use 0.)
-- [x] **Doc**: design doc "Low-water mark and the idle floor" and
-  "Sparse-tenant responsiveness" -- confirm the D1 wording (frontier per
-  partition, no hold, cold-seed refresh plus reconcile) matches the
-  implementation and add the worked example from the idle-tenant test;
-  mongodb doc open question #2 -- the frontier access path, explain
-  results
-- [x] **Doc audit**: grep both design docs for "low-water", "LWM",
-  "floor", "pending set", "trailing edge", and "per-tenant" and fix every
-  statement the per-partition, memoryless definition contradicts
+- [ ] Reverse pass: list every exported identifier (`go doc -all .`),
+  sentinel error, and `Option`. For each, find where the docs describe
+  it; flag behavior or caller obligations stated only in godoc (e.g.
+  read concern, collation, write concern, `OmitEmpty`, client-clock
+  `visible_at` skew)
+- [ ] Godoc vs docs: where both state a rule, they must agree in
+  substance. Disagreement is a deviation unless one is plainly older
+- [ ] "Correctness invariants": for each invariant, name the enforcing
+  test(s) in the worksheet, or mark it "caller obligation" or
+  "unenforced" (e.g. Bounded degradation, Work conservation)
+- [ ] "Rejected alternatives" and `docs/rejected-designs.md`: flag any
+  alternative the code adopted, and any argument stated against a model
+  the code no longer has
+- [ ] **Test**: for each **untested** finding, add the test here if it is
+  small; otherwise record it in `REVIEW.md`
 
 ---
 
-## 6.4 Public Surface and Docs
+## 7.4 Reconciliation: Plan, AGENTS.md, Open Questions
 
-- [x] Prune stored LWMs (6.0 D1, decided 2026-10-13): after each walk,
-  `invalidateAndEvict` deletes every `lwm` key whose partition has no
-  cached timeline left (self-healing if a late refresh re-stores a
-  pruned key) (take `lwmMu` after the global
-  lock per the lock order; no I/O). Update the `lwm` and `refreshLWM`
-  doc comments: stored values are pruned with the partition's last
-  entry, and a late refresh may overwrite a newer value with an older
-  one (accepted bounded dip). Fix `reconcile`'s comment: an error skips
-  invalidation and eviction; frontiers refreshed before it are kept
-- [x] **Test** (unit): LWM pruned with the partition -- `lwmHook`
-  returns `(10e6, true)` for `p1` and `p2`; reserve+commit `(a, p1)` and
-  `(a, p2)`; `refreshLWM` both. Walk (both touched, so both go stale);
-  reserve+commit `(a, p1)` only; walk again: `(a, p2)` is evicted,
-  `(a, p1)` is not, `lwmFor("p2")` reads 0 and `lwmFor("p1")` still reads
-  `10e6`. Then, with the hook now returning `(0, false)` and no seed hook
-  (edge 0), a cold reserve for `(b, p2)` gets vstamp `1e6` (cost 1,
-  weight 1), not `11e6`
-- [x] Rename `reconcile` to exported `Reconcile(ctx) error`; update tests.
-  Godoc: what it does (refresh each cached partition's frontier,
-  invalidate touched entries, evict idle ones), that callers run it on a
-  ticker, that after a successful call each timeline re-seeds before its
-  next stamp, that an idle entry is evicted after two consecutive
-  untouched passes (so up to two intervals), that an error skips
-  invalidation and eviction (frontiers refreshed before it are kept), that new and evicted tenants are floored correctly
-  even without it (cold-seed refresh) but active timelines' drift is only
-  corrected by it, and that concurrent calls are safe
-- [x] `ExampleQueue_Reconcile` in `example_test.go`: ticker loop in a
-  goroutine with ctx cancellation. No `// Output:` comment, so it compiles
-  but does not run (it needs a server)
-- [x] Package godoc (`doc.go`): one paragraph naming `Reconcile` as a
-  caller obligation alongside `EnsureIndexes`; one sentence that fairness
-  is per partition and memoryless
-- [x] **Test**: concurrent `Reconcile` -- 4 goroutines call `Reconcile`
-  in a loop while 2 goroutines enqueue for one tenant in one partition;
-  under `-race`, assert no error and the tenant's stamps are exactly
-  `{1..N}×1e6`. The example compiles under `go vet`; other behavior is
-  covered by 6.1-6.3
-- [x] **Doc**: mongodb doc -- close open questions #2 and #3 (move the
-  answers into the body, leave a one-line pointer); design doc "Why a
-  cache, and what it costs" -- staleness bound is the caller's reconcile
-  interval; implementation plan Phase 6 -- note the subphase reshaping
-  (per-partition timelines added; lazy invalidation replaced eager
-  rebuild; "rebuild on startup" is the lazy seed plus cold-seed frontier
-  refresh); design doc "Low-water mark and the idle floor" -- add the
-  2026-10-13 D1 decisions: a late refresh may store an older, lower
-  frontier (bounded dip, accepted), a frontier query that finds only
-  leased or delayed jobs keeps the prior LWM so new tenants sit above
-  them, and a partition's LWM is dropped with its last cached timeline
+- [ ] `docs/implementation-plan.md` Phases 1-5: add short as-built notes
+  where specs were superseded (1.3 and 3.4 index keys → the three partial
+  indexes; 3.1 per-tenant cache → per-(tenant, partition); 3.1 "LWM
+  floor" wording). Do not rewrite the original subsections
+- [ ] `docs/implementation-plan.md` Phase 6 preamble: confirm it names
+  6.5 and 6.6 (SCALE, checked arithmetic, service clock, partial indexes)
+- [ ] AGENTS.md "The model in brief" and "Mongo/Go specifics": check each
+  bullet against the code
+- [ ] mongodb doc Open Questions: close #1 (`Mux`) with a pointer to the
+  deferred list
+- [ ] Deferred lists: the plan's "Future Phases", the mongodb doc's
+  "Deferred / future work", and the fair doc's deferrals. Each item
+  appears in exactly one place; the others point to it
+- [ ] Doc audit grep across `docs/`, `*.go`, AGENTS.md: "Phase [0-9]",
+  "deferred to a later phase", "TODO", "not yet" -- remove references
+  that no longer hold
 
-## 6.5 Review Follow-ups (decided 2026-10-13)
+---
 
-- [x] Frontier leased fallback: when no job is visible, `computeLWM` takes
-  the max vstamp among leased jobs (`claim_id` > `""`). Supersedes the
-  6.4 decision to keep the prior LWM when only leased or delayed jobs
-  remain: a retained value ages without bound in a fully leased partition
-  and is 0 on a cold node, granting newcomers unbounded idle credit.
-  `claim_id` appended to the claim index so the fallback is covered
-- [x] **Test**: `TestComputeLWM` fallback cases (leased max; delayed,
-  released, resolved skipped; delayed-only partition has none);
-  cold-node and warm-node all-leased placement tests; both fail without
-  the fallback. Explain check recorded in the mongodb doc
-- [x] SCALE 1e6 -> 1e3 and checked stamp arithmetic: the 1e6 overflow
-  bound was off by 10^6 (107 days, not 292,000 years, at 10^6
-  cost-units/s). `nextVStamp` returns `ErrVTimeOverflow` instead of
-  wrapping; tests use `scale` rather than literals
-- [x] `Reconcile` attempts every partition, joins failures, and always
-  walks (one failing partition no longer stalls marking and eviction);
-  stops refreshing once ctx is done
-- [x] Deferred: channel-gated test forcing a late refresh across a prune
-  and a recreated timeline -- moved to 6.6 and re-scoped there
+## 7.5 Deviation Review
 
-## 6.6 Service-Clock Frontier and Index Consolidation (decided 2026-10-17)
+- [ ] Walk `REVIEW.md` deviations with the user one at a time. For each,
+  record the decision in `REVIEW.md` (fix code / fix doc / accept and
+  document / defer)
+- [ ] Apply each decision as its own commit, with a test for any code
+  change. Record any rejected alternative in the design doc or
+  `docs/rejected-designs.md`, per AGENTS.md
+- [ ] Untested follow-ups from 7.3: write or move to Future Phases
+- [ ] Mark 7.2-7.5 done in `docs/implementation-plan.md`
 
-Replaces the frontier rule from 6.3 and 6.5 (min visible, else max leased).
-**6.6 supersedes every earlier statement in this file that defines the LWM
-as the minimum visible vstamp**, including 6.0 "LWM state" (`ok == false`
-now means "partition has no claimed and no pending job") and the 6.3/6.5
-test descriptions. Findings and reasoning: REVIEW.md (gitignored; codex
-review of d301de5) and the 2026-10-17 session.
+---
 
-### Decision
+## 7.6 Package Godoc (`doc.go`)
 
-**LWM = the partition's service clock: the maximum vstamp among the
-partition's jobs that have ever been claimed** -- `claim_id > ""`, any
-liveness. Claim sets `claim_id`; Complete and Cancel leave it intact
-(`resolve.go`); only Release clears it. **Fallback, only when the clock
-query finds nothing** (partition never claimed, or its claimed history was
-GC'd): the minimum vstamp among the partition's pending jobs, any
-visibility. Neither found: `ok = false`, and `refreshLWM` keeps the prior
-value (unchanged). Keep plain overwrite in `refreshLWM` (no running max):
-the clock is monotone except for a Release of the top claimed job, GC, or a
-late refresh, all small dips.
+- [ ] Replace the placeholder sentence ("Full godoc is deferred to a
+  later phase") with a full package doc. Use the `library-docs` skill
+- [ ] Model overview: virtual-time fairness per partition, memoryless
+  placement, stamp at enqueue, lease not removal, fenced resolution
+- [ ] Caller obligations, each one sentence with a link to the identifier
+  that states it in full: `EnsureIndexes` before use; `Reconcile` on a
+  ticker; optional `EnsureTTLIndex`; single writer per (tenant,
+  partition); weight consistency across producers; acknowledged writes
+  (`w: "majority"` for single resolution across failover); reads observe
+  own inserts; simple default collation; no `OmitEmpty`; effects are
+  at-least-once (idempotent workers); delayed jobs jump the queue when
+  they come due; bounded retries are the worker's job (`Attempts`)
+- [ ] Lifecycle summary: Enqueue → Claim → Heartbeat / Release /
+  Complete; Cancel; Get
+- [ ] Check rendering with `go doc .` (headings, links)
 
-Why: every earlier rule failed one common case.
+---
 
-| Rule | Failure |
-|---|---|
-| Min visible only (6.3) | Fully leased partition (workers keep up): no frontier, newcomer floored at stale value or 0 |
-| Min visible, else max leased (6.5, current code) | Partition with only delayed jobs: no frontier, newcomer at 0 beats a woken scheduled batch. Also: a long lease outlives later short jobs, so in a lull max leased falls back to the long job's stamp (credit) |
-| + min pending as third step | Works, but three conditional queries; a low-stamp Release retry pins it in delayed-only partitions |
-| Min over all pending, any state | A poison job retried via `Release(delay)` (keeps its vstamp), a long heartbeated job, or a long `Delay` pins the floor for its lifetime; unbounded credit |
-| First unclaimed (`claim_id == ""`), any visibility | Fully leased partition has none (finding #1 again); backoff retries and long delays pin it even in busy partitions |
-| Max leased first | O(backlog) scan: descends through every unclaimed job above the top lease (explain: 10,101 keys for a 10,000-job backlog) |
-| Clock from resolved jobs via the claim index | Lags by the in-flight window; scans every cancelled-before-claim job stamped above the clock |
+## 7.7 Worker-Pool Example (`example_test.go`)
 
-Accepted behavior of the clock: in a busy partition it sits about one
-stride below the next visible job (negligible). When low-stamped work
-re-enters the visible set (expired leases, a woken delayed batch, released
-retries), the newcomer lands behind it -- approximately FIFO, no credit.
-Release keeping its original vstamp stays as is (decided 2026-10-17): a
-worker cannot take a fresh stamp without the tenant's timeline, and the
-clock makes the question moot.
+- [ ] `Example` (package-level): `NewKind[T]`, `Enqueue`, a fixed pool of
+  workers looping `Claim` → `Decode` → work → `Complete`; `ErrNoJob`
+  backs off; a heartbeat goroutine for long work; `Release` with a delay
+  on transient failure; ctx cancellation for shutdown. No `// Output:`
+- [ ] Keep it short enough to read on pkg.go.dev; split heartbeat or
+  release into separate `ExampleClaimedJob_Heartbeat` /
+  `ExampleClaimedJob_Release` if the main example passes ~60 lines
+- [ ] **Test**: `go vet ./...` compiles the examples
 
-### Indexes
+---
 
-Explain check (2026-10-17, MongoDB 8.2.11, script kept at
-`scratchpad/explain.js` of that session; re-create it from this table): one
-partition with 2,000 claimed-and-resolved jobs, 50 cancelled-before-claim at
-high stamps, one long lease at 500, 20 in flight, 10,000 visible backlog,
-100 delayed, 5 released retries; plus a never-claimed delayed-only partition.
+## 7.8 README (`README.md`)
 
-| Query | Index | Keys | Docs |
-|---|---|---|---|
-| Claim (min visible) | claim (partial) | 27 | 1 |
-| Seed (tenant max pending) | seed (partial) | 1 | 0 |
-| Clock (max ever claimed) | clock | 1 | 0 |
-| Clock, never-claimed partition | clock | 0 | 0 |
-| Fallback (min pending) | claim (partial) | 1 | 0 |
-
-Target index set (all partial indexes; `liveness` and `claim_id` leave the
-claim index's keys):
-
-| Name | Keys | `partialFilterExpression` | Serves |
-|---|---|---|---|
-| claim | `{partition: 1, vstamp: 1, _id: 1, visible_at: 1}` | `{liveness: "pending"}` | Claim, fallback |
-| seed | `{tenant: 1, partition: 1, vstamp: -1}` | `{liveness: "pending"}` | Seed |
-| clock | `{partition: 1, vstamp: -1}` | `{claim_id: {$gt: ""}}` | Clock |
-| TTL | `{resolved_at: 1}` (unchanged, optional) | -- | GC |
-
-Index writes per job lifecycle are unchanged (7 vs 7): enqueue 2; first
-claim 2 (claim rewrite + clock insert); resolve 2 deletes (were rewrites);
-TTL removal 1 (was 2). Reclaim does not touch clock (keys unchanged);
-Release deletes the clock entry and the next claim re-adds it. Index size on
-the explain dataset fell from 794 KB to 573 KB. A query uses a partial index
-only if its filter implies the partial filter: every library query must
-keep `liveness: LivenessPending` (claim, seed, fallback) or
-`claim_id: {$gt: ""}` (clock) as a literal predicate. Old index specs are
-orphaned; nothing is released, so no migration.
-
-### 6.6.1 Frontier and indexes (`queue.go`, `claim.go`)
-- [x] `computeLWM`: clock query (`partition`, `claim_id: {$gt: ""}`; sort
-  `{vstamp: -1}`; projection `{vstamp: 1, _id: 0}` so it is covered), then
-  the fallback (`partition`, `liveness: pending`; sort `{vstamp: 1}`;
-  covered) only on no result. Delete `leasedFilter`. `claimFilter` and
-  `claimSort` stay for `Claim`. Rewrite the godoc to state the rule and
-  why job state does not enter it
-- [x] `EnsureIndexes`: the three partial indexes above; rewrite its godoc
-  (what each index serves, why each is partial, the write-cost note)
-- [x] Update `lwmHook`/`refreshLWM`/`computeLWM` comments that say "no
-  visible pending job" or "delayed only"
-- [x] **Test**: rewrite `TestComputeLWM` -- clock is the max claimed vstamp
-  across pending and resolved; a long lease at a low stamp does not lower
-  it; released retries (cleared fence), delayed and never-claimed jobs do
-  not raise or pin it; cancelled-before-claim jobs at high stamps are
-  ignored; never-claimed partition falls back to min pending (delayed jobs
-  count); empty partition `(0, false)`; other partitions ignored
-- [x] **Test**: rewrite `TestEnsureIndexesCreatesClaimAndSeedIndexes` for
-  the new keys and partial filters
-- [x] **Test**: delayed-only partition interleaves -- tenant `a` enqueues
-  and claim+completes `a-000`..`a-009` (clock 10×scale), then enqueues 5
-  jobs with `Delay`; fresh Queue (cold node), tenant `b` enqueues 5 jobs:
-  first stamp is 11×scale, not 1×scale. Make `a`'s delayed jobs visible
-  (write `visible_at` into the past) and drain: `a` and `b` alternate
-- [x] **Test**: long lease does not pull the floor back -- claim `a-000`
-  and hold the lease (do not complete); claim+complete `a-001`..`a-009`;
-  cold seed for `b` stamps 11×scale (clock 10×scale), not 2×scale
-- [x] **Test**: explain check as an integration test or recorded in the
-  mongodb doc (keys/docs per the table above); the stop rule from 6.3.1
-  applies -- report, do not add indexes beyond the three
-
-### 6.6.2 Test fallout and codex findings
-- [x] Re-derive exact vstamps in every test whose expectations came from
-  min-visible: `TestLWM*` and `TestReconcile*` in `reconcile_test.go`,
-  `TestFairness*` in `fairness_test.go` where a claim precedes a cold
-  seed, `TestColdStartSeed`. Rename the two `AllLeased` tests to say what
-  they now prove. Keep each test's stated rule in its comment; change the
-  rule text only where the clock changes it. Re-run the verification
-  checklist after this step alone, before 6.6.3
-- [x] Codex #1: `Reconcile` checks `ctx.Err()` at the top of each refresh
-  iteration, records it, breaks, and still walks
-- [x] **Test** (codex #1): hook cancels ctx but returns success; assert no
-  further hook call and the walk ran
-- [x] **Test** (codex #2): two partitions fail with distinct sentinel
-  errors, a third succeeds; `errors.Is` matches both sentinels and the
-  third partition's LWM was stored
-- [x] **Test** (re-scoped from 6.5): channel-gated late refresh across a
-  prune and a recreated timeline -- the stored value is the late one (plain
-  overwrite) and the next walk/refresh corrects it. Write it only if it
-  stays short; otherwise record it in Future Phases
-
-### 6.6.3 Docs
-- [x] Design doc "Low-water mark and the idle floor": the clock rule in one
-  sentence, the fallback, accepted overshoot behind re-visible low-stamped
-  work; drop the visible/leased/delayed case analysis. Add the rejected
-  rules from the Decision table to "Rejected alternatives"
-- [x] Design doc lifecycle definitions (codex #3, ~line 483): the LWM no
-  longer reads the visible set; define a lease by its claim fence, distinct
-  from an unclaimed visibility delay
-- [x] Design doc invariants ("Lease accounting" ~line 755): visibility
-  changes no longer move the sampled LWM; claims and releases do
-- [x] mongodb doc: index section and explain check (replace the
-  2026-10-13 leased-fallback check); `computeLWM` access path
-- [x] AGENTS.md "The model in brief": the frontier is the service clock,
-  not "the vstamp the next claim would take"
-- [x] **Doc audit**: grep docs, godoc, and AGENTS.md for "frontier",
-  "visible", "leased fallback", "LWM", "low-water" and fix every statement
-  the clock contradicts
+- [ ] Use the `library-docs` skill. Badges: pkg.go.dev reference
+  (`github.com/xdg-go/mongoqueue`), CI status (`.github/workflows/test.yml`),
+  Go Report Card, license (Apache-2.0)
+- [ ] One-paragraph pitch (what it is, what it deliberately is not), a
+  `go get` line, a pointer to godoc for usage and to `docs/` for design
+- [ ] Brief: no API replay, no usage rules (those are godoc's)
+- [ ] Mark 7.6-7.8 done in `docs/implementation-plan.md`
 
 ---
 
 ## Future Phases (Deferred)
 
-- Multi-writer detection (per-timeline distinct `stamped_by` count during
-  reconcile) -- the `Reconcile` pass is its natural home; not in v1
-- Internal reconcile goroutine or `RunReconciler` helper -- add only if
-  callers ask; D3 keeps `New` goroutine-free
-- Batched re-seed (one `$in` query for many invalidated timelines) -- only
-  if per-timeline re-seed latency shows up in enqueue measurements
-- Backlog reconstruction (LWM + sum of pending strides) -- rejected in the
-  design in favor of trailing edge; revisit only with multi-writer
-- Bounded idle credit (`frontier - k strides`, CFS-style sleeper bonus) --
-  rejected for v1 (D1); revisit only with evidence that sparse tenants
-  need more than one-stride-from-the-front latency
-- Weight-change transition behavior -- documented, not tested
+See [docs/implementation-plan.md](docs/implementation-plan.md) "Future
+Phases" -- the single deferred list. Add items there, not here.

@@ -243,23 +243,71 @@ subsections below are the original plan.
 
 ## Phase 7: Ops Hardening and Documentation
 
-Production readiness: GC, observability hooks, and public documentation.
+Production readiness: GC verification, design-doc reconciliation, and public
+documentation. As decided 2026-10-17: no observability hooks are built (the
+caller can query the collection); `stamped_by` is already wired and tested
+(Phase 3); release tagging is separate from this phase. `TODO.md` splits
+7.3 into 7.2-7.5 and 7.4 into 7.6-7.8.
 
 ### 7.1 GC and retention
-- **Test**: TTL index ages out resolved jobs only; pending/claimed jobs
-  untouched (short-retention integration test)
+- Trust the server's TTL monitor; test only the shapes it acts on. No
+  short-retention test (the monitor runs every 60s; lowering
+  `ttlMonitorSleepSecs` mutates server-wide state)
+- **Test**: TTL index shape is already covered (`TestEnsureTTLIndex`); add
+  a lifecycle test that pending, claimed, heartbeated, released, and
+  lease-expired jobs carry no `resolved_at`, and completed and canceled
+  jobs do
 
-### 7.2 Observability seams
-- `stamped_by` recorded on every enqueue (verify Phase 3 wiring);
-  `ClaimOpts` room for a `claimed_by` label documented, not built
-- **Test**: `stamped_by` reflects the enqueueing node id
+### 7.3 Design-doc reconciliation against the code
+Phases 3-6 changed the design as they went (per-(tenant, partition)
+timelines, lazy-invalidation reconcile, service-clock frontier, partial
+indexes, SCALE 1e3, checked arithmetic). The docs were patched along the
+way; this step confirms the patches are complete. The code is the presumed
+reference, but every gap is classified before anything is edited, because
+some gaps will be code bugs.
 
-### 7.3 Documentation
+- Fold the decision records from `TODO.md` (6.0 D1-D3, "Cache state and
+  locking", "Seed reads from the primary", "Known effect", 6.6 Decision and
+  index tables) into the design docs or `docs/rejected-designs.md` before
+  `TODO.md` is replaced for Phase 7. Anything that lives only in `TODO.md`
+  or the gitignored `REVIEW.md` is lost when the file turns over. Done
+  2026-10-17, before `TODO.md` was replaced
+- Claim-by-claim pass over `fair-job-queue-design.md` and
+  `mongodb-go-library-design.md`: for each normative statement (rules,
+  field names, query shapes, index keys, error names, lifecycle
+  transitions, invariants), find the code that implements it and the test
+  that proves it. Record each in a worksheet (the `REVIEW.md` appendix,
+  not committed): statement, doc location, code location, test, verdict
+- Verdicts: **doc lags** (fix the doc), **code deviates** (write it to a
+  fresh `REVIEW.md`, gitignored; change neither code nor doc until it is
+  decided -- deviations are reviewed one by one with the user),
+  **untested** (add a test or note it), **undecided** (move to Open
+  Questions)
+- Reverse pass: walk exported identifiers, sentinel errors, and godoc in
+  `*.go`; flag any behavior or caller obligation the docs never mention
+- Check the "Correctness invariants" section invariant by invariant:
+  each names the test that enforces it, or is marked as unenforced
+- Check "Rejected alternatives" and `rejected-designs.md` for alternatives
+  that later phases quietly adopted, or that are stated against an older
+  model (min-visible LWM, per-tenant timelines, single claim index)
+- This plan itself: Phases 1-6 describe superseded specs (1.3 and 3.4 index
+  keys, 3.1 per-tenant cache, 6.x original subsections); add as-built notes
+  in the style of the Phase 6 preamble rather than rewriting history
+- AGENTS.md "The model in brief" and "Mongo/Go specifics" against the code
+- Close or update Open Questions: #1 (`Mux` dispatch helper) is deferred
+  and closed (decided 2026-10-17). Every deferred item appears in exactly
+  one Deferred/Future list across the docs, not three
+- **Test**: any behavior found untested gets a test, in this subphase or
+  recorded as a follow-up; doc-only fixes need no test
+
+### 7.4 Documentation
 - Package godoc: model overview, caller obligations (single-writer,
   weight consistency, index creation, at-least-once effects, delayed jobs jump
-  the queue)
+  the queue); remove the "Full godoc is deferred" placeholder in `doc.go`
 - Runnable example: enqueue/claim/complete loop with a worker pool
-- Reconcile design docs with as-built decisions; update open questions
+- Minimal `README.md` for GitHub visitors: badges (pkg.go.dev reference,
+  Go Report Card, CI status, license), one-paragraph pitch, install line,
+  link to godoc and design docs. Brief; usage rules live in godoc
 
 ---
 
@@ -280,3 +328,12 @@ Production readiness: GC, observability hooks, and public documentation.
 - `Kind` → handler `Mux` dispatch helper (open question #1; a layer above the
   primitive, not part of it)
 - `ClaimOpts` with `claimed_by` observability label
+
+### Cache and reconcile (from Phase 6)
+- Internal reconcile goroutine or `RunReconciler` helper -- only if callers
+  ask; `New` stays goroutine-free
+- Batched re-seed (one `$in` query for many invalidated timelines) -- only
+  if per-timeline re-seed latency shows up in enqueue measurements
+- Backlog reconstruction (LWM + sum of pending strides) instead of trailing
+  edge -- revisit only with multi-writer
+- Weight-change transition behavior -- documented, not tested
