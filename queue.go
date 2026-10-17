@@ -312,9 +312,13 @@ const (
 	clockIndexName = "mongoqueue_clock"
 )
 
+// ttlIndexName is the name EnsureTTLIndex assigns.
+const ttlIndexName = "mongoqueue_ttl"
+
 // EnsureTTLIndex creates the garbage-collection TTL index on resolved_at with
-// expireAfterSeconds derived from retention. Because resolved_at is set only by
-// the terminal write, the TTL never touches pending or claimed jobs.
+// expireAfterSeconds derived from retention. The index is partial on
+// liveness: resolved, so it holds resolved jobs only and the TTL can never
+// delete a pending or claimed job, whatever fields that job carries.
 //
 // There is no default retention and no TTL index unless the caller invokes
 // this: TTL is destructive policy, kept separate from the required claim index
@@ -341,8 +345,11 @@ func (q *Queue) EnsureTTLIndex(ctx context.Context, retention time.Duration) err
 		return fmt.Errorf("mongoqueue: TTL retention must be between 1s and %ds (~68 years), got %v", int64(math.MaxInt32), retention)
 	}
 	model := mongo.IndexModel{
-		Keys:    bson.D{{Key: "resolved_at", Value: 1}},
-		Options: options.Index().SetExpireAfterSeconds(int32(seconds)),
+		Keys: bson.D{{Key: "resolved_at", Value: 1}},
+		Options: options.Index().
+			SetName(ttlIndexName).
+			SetExpireAfterSeconds(int32(seconds)).
+			SetPartialFilterExpression(bson.D{{Key: "liveness", Value: LivenessResolved}}),
 	}
 	if _, err := q.coll.Indexes().CreateOne(ctx, model); err != nil {
 		return fmt.Errorf("mongoqueue: create TTL index: %w", err)

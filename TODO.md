@@ -135,17 +135,17 @@ survives across sessions.
 
 ## 7.1 Partial TTL Index and Shape Tests
 
-- [ ] `EnsureTTLIndex` (`queue.go`): add `SetName("mongoqueue_ttl")` and
+- [x] `EnsureTTLIndex` (`queue.go`): add `SetName("mongoqueue_ttl")` and
   `SetPartialFilterExpression(bson.D{{"liveness", LivenessResolved}})`;
   add `ttlIndexName` beside the other index-name constants
-- [ ] Rewrite `EnsureTTLIndex` godoc: the index holds resolved jobs only,
+- [x] Rewrite `EnsureTTLIndex` godoc: the index holds resolved jobs only,
   so the TTL can never touch a pending or claimed job regardless of its
   fields; keep the retention-range, conflict/`collMod`, and service-clock
   paragraphs
-- [ ] **Test**: update `TestEnsureTTLIndex` -- name `mongoqueue_ttl`, key
+- [x] **Test**: update `TestEnsureTTLIndex` -- name `mongoqueue_ttl`, key
   `{resolved_at: 1}`, `expireAfterSeconds`, and
   `partialFilterExpression == {liveness: "resolved"}`
-- [ ] **Test**: `TestResolvedAtOnlyOnResolvedJobs` -- drive one job each
+- [x] **Test**: `TestResolvedAtOnlyOnResolvedJobs` -- drive one job each
   through: enqueued (pending, never claimed), delayed, claimed,
   heartbeated, released, lease-expired (claim, then write `visible_at`
   into the past), completed, canceled before claim, canceled while
@@ -153,13 +153,13 @@ survives across sessions.
   cannot hide) and assert `liveness` and `resolved_at` agree: the pending
   six have `liveness: "pending"` and no `resolved_at`; the resolved three
   have `liveness: "resolved"` and a BSON date
-- [ ] **Doc**: mongodb doc "Indexes, contention, and GC" -- TTL row of the
+- [x] **Doc**: mongodb doc "Indexes, contention, and GC" -- TTL row of the
   index table (name, partial filter), the write-cost paragraph (TTL
   writes per lifecycle), and the GC/retention text; fair doc "Storage
   requirements" GC note if it describes which records the TTL sees.
   Grep docs and godoc for `resolved_at` and "TTL" and fix what the
   partial filter changes
-- [ ] Mark 7.1 done in `docs/implementation-plan.md`
+- [x] Mark 7.1 done in `docs/implementation-plan.md`
 
 ---
 

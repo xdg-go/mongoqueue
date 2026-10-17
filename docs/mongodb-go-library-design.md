@@ -480,14 +480,15 @@ errors pass through wrapped.
 
 ## Indexes, contention, and GC
 
-`EnsureIndexes` creates three partial indexes, named so a re-call is a
-server-side no-op:
+`EnsureIndexes` creates the first three partial indexes and `EnsureTTLIndex`
+the fourth, each named so a re-call is a server-side no-op:
 
 | Name | Keys | `partialFilterExpression` | Serves |
 |---|---|---|---|
 | `mongoqueue_claim` | `{partition: 1, vstamp: 1, _id: 1, visible_at: 1}` | `{liveness: "pending"}` | Claim; frontier fallback |
 | `mongoqueue_seed` | `{tenant: 1, partition: 1, vstamp: -1}` | `{liveness: "pending"}` | Seed (trailing edge) |
 | `mongoqueue_clock` | `{partition: 1, vstamp: -1}` | `{claim_id: {$gt: ""}}` | Frontier service clock |
+| `mongoqueue_ttl` | `{resolved_at: 1}` | `{liveness: "resolved"}` | TTL GC (`EnsureTTLIndex`; `expireAfterSeconds` = retention) |
 
 **Claim index.** The leading keys serve the claim filter and its `(vstamp,
 _id)` sort; `visible_at` rides in the index so the visibility predicate
@@ -521,7 +522,10 @@ entry; resolution deletes the claim and seed entries; TTL removal deletes
 the clock entry. A reclaim leaves the clock entry alone (its keys do not
 change); Release deletes it and the next claim re-adds it. Index size on the
 2026-10-17 measurement dataset (see the explain check below) fell from 794
-KB to 573 KB.
+KB to 573 KB. The TTL index, when created, adds one insert at resolution,
+one delete at TTL removal, and nothing at enqueue: it is partial on
+`liveness: "resolved"`, so pending jobs have no entry in it (a full index
+would hold a null-key entry for each).
 
 **Earlier indexes.** Indexes from earlier versions,
 `partition_1_liveness_1_vstamp_1__id_1_visible_at_1_claim_id_1` and
@@ -663,9 +667,14 @@ collection are a scheduled operational event -- hence no auto-creation for
 either.
 
 **GC.** The terminal write sets `resolved_at`. `EnsureTTLIndex` keys the TTL
-index on it; there is no default retention and no TTL index unless the caller
-invokes it. Resolved jobs keep their `claim_id`, so they stay in the clock
-index and carry the frontier's service clock until TTL removes them: retention
+index `mongoqueue_ttl` on it, partial on `{liveness: "resolved"}`, so only
+resolved jobs are ever in the index and the TTL monitor cannot delete a
+pending job. That safety rests on the liveness state machine -- Complete and
+Cancel set `liveness` and `resolved_at` in one update -- not on `omitempty`;
+`resolved_at` stays `omitempty` so pending documents carry no dummy date.
+There is no default retention and no TTL index unless the caller invokes
+it. Resolved jobs keep their `claim_id`, so they stay in the clock index and
+carry the frontier's service clock until TTL removes them: retention
 should comfortably exceed the time between claims in a partition, or the
 frontier drops to the min-pending fallback once a partition's claimed
 history is gone. Retention is validated to `[1s, math.MaxInt32 s]` (~68 years):

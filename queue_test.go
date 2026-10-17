@@ -46,20 +46,6 @@ func listIndexes(ctx context.Context, t *testing.T, coll *mongo.Collection) []in
 	return got
 }
 
-// keyFields decodes an index key document into its ordered field names.
-func keyFields(t *testing.T, key bson.Raw) []string {
-	t.Helper()
-	var d bson.D
-	if err := bson.Unmarshal(key, &d); err != nil {
-		t.Fatalf("decode index key %v: %v", key, err)
-	}
-	fields := make([]string, len(d))
-	for i, e := range d {
-		fields[i] = e.Key
-	}
-	return fields
-}
-
 // TestNewCreatesNoIndexes proves New performs no I/O and creates no index. A
 // non-existent collection reports no indexes at all, so a dummy write is used
 // to materialize the collection; the only index that then exists must be the
@@ -174,7 +160,8 @@ func TestEnsureIndexesCreatesPartialIndexes(t *testing.T) {
 }
 
 // TestEnsureTTLIndex asserts EnsureTTLIndex creates a TTL index on resolved_at
-// whose expireAfterSeconds matches the supplied retention (24h == 86400s).
+// named mongoqueue_ttl, partial on resolved jobs, whose expireAfterSeconds
+// matches the supplied retention (24h == 86400s).
 func TestEnsureTTLIndex(t *testing.T) {
 	t.Parallel()
 
@@ -187,22 +174,119 @@ func TestEnsureTTLIndex(t *testing.T) {
 		t.Fatalf("EnsureTTLIndex: %v", err)
 	}
 
+	// Assert name, key, retention, and partial filter, so a regression in
+	// any of them is caught.
 	var ttl *indexInfo
 	all := listIndexes(ctx, t, coll)
 	for i := range all {
-		if fields := keyFields(t, all[i].Key); len(fields) == 1 && fields[0] == "resolved_at" {
+		if all[i].Name == ttlIndexName {
 			ttl = &all[i]
 			break
 		}
 	}
 	if ttl == nil {
-		t.Fatalf("no index keyed on resolved_at found: %+v", all)
+		t.Fatalf("index %q not found among %+v", ttlIndexName, all)
+	}
+	var key, partial bson.D
+	if err := bson.Unmarshal(ttl.Key, &key); err != nil {
+		t.Fatalf("decode TTL key: %v", err)
+	}
+	if want := (bson.D{{Key: "resolved_at", Value: int32(1)}}); !reflect.DeepEqual(key, want) {
+		t.Errorf("TTL key = %v, want %v", key, want)
 	}
 	if ttl.ExpireAfterSeconds == nil {
-		t.Fatal("resolved_at index has no expireAfterSeconds; not a TTL index")
+		t.Fatal("TTL index has no expireAfterSeconds")
 	}
 	if *ttl.ExpireAfterSeconds != 86400 {
 		t.Errorf("expireAfterSeconds = %d, want 86400", *ttl.ExpireAfterSeconds)
+	}
+	if ttl.PartialFilterExpression == nil {
+		t.Fatal("TTL index has no partialFilterExpression")
+	}
+	if err := bson.Unmarshal(ttl.PartialFilterExpression, &partial); err != nil {
+		t.Fatalf("decode TTL partial filter: %v", err)
+	}
+	if want := (bson.D{{Key: "liveness", Value: "resolved"}}); !reflect.DeepEqual(partial, want) {
+		t.Errorf("TTL partialFilterExpression = %v, want %v", partial, want)
+	}
+}
+
+// TestResolvedAtOnlyOnResolvedJobs drives one job through each lifecycle state
+// and asserts resolved_at is present exactly when liveness is resolved. The
+// TTL index is partial on liveness: resolved, so a resolved job without
+// resolved_at would never expire and a pending job with it would be a lie the
+// index happens to ignore. Documents are read as bson.Raw so a zero time
+// decoded into Job cannot mask a missing or spurious field.
+func TestResolvedAtOnlyOnResolvedJobs(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	q := New(db.Collection("jobs"))
+
+	// Each job lives in its own partition, named by its id, so a claim
+	// reaches only that job. Fixture helpers take the subtest t so a
+	// failure stops the right goroutine.
+	enqueue := func(t *testing.T, id string, delay time.Duration) {
+		enqueueJob(ctx, t, q, EnqueueOpts{JobID: id, TenantID: "t1", Cost: 1, Partition: id, Delay: delay})
+	}
+	claim := func(t *testing.T, id string) *ClaimedJob {
+		enqueue(t, id, 0)
+		return mustClaim(ctx, t, q, id)
+	}
+
+	cases := []struct {
+		id       string
+		setup    func(t *testing.T, id string)
+		resolved bool
+	}{
+		{"enqueued", func(t *testing.T, id string) { enqueue(t, id, 0) }, false},
+		{"delayed", func(t *testing.T, id string) { enqueue(t, id, time.Hour) }, false},
+		{"claimed", func(t *testing.T, id string) { claim(t, id) }, false},
+		{"heartbeated", func(t *testing.T, id string) {
+			if err := claim(t, id).Heartbeat(ctx, time.Hour); err != nil {
+				t.Fatalf("heartbeat %q: %v", id, err)
+			}
+		}, false},
+		{"released", func(t *testing.T, id string) {
+			if err := claim(t, id).Release(ctx, 0); err != nil {
+				t.Fatalf("release %q: %v", id, err)
+			}
+		}, false},
+		{"lease-expired", func(t *testing.T, id string) { expireLease(ctx, t, q, claim(t, id)) }, false},
+		{"completed", func(t *testing.T, id string) {
+			if err := claim(t, id).Complete(ctx, ResolutionCompleted); err != nil {
+				t.Fatalf("complete %q: %v", id, err)
+			}
+		}, true},
+		{"canceled-unclaimed", func(t *testing.T, id string) { enqueue(t, id, 0); mustCancel(ctx, t, q, id) }, true},
+		{"canceled-claimed", func(t *testing.T, id string) { claim(t, id); mustCancel(ctx, t, q, id) }, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			tc.setup(t, tc.id)
+
+			var doc bson.Raw
+			if err := q.coll.FindOne(ctx, bson.D{{Key: "_id", Value: tc.id}}).Decode(&doc); err != nil {
+				t.Fatalf("find %q: %v", tc.id, err)
+			}
+			wantLiveness := "pending"
+			if tc.resolved {
+				wantLiveness = "resolved"
+			}
+			if got, ok := doc.Lookup("liveness").StringValueOK(); !ok || got != wantLiveness {
+				t.Errorf("liveness = %v, want %q", doc.Lookup("liveness"), wantLiveness)
+			}
+			resolvedAt, err := doc.LookupErr("resolved_at")
+			switch {
+			case tc.resolved && err != nil:
+				t.Errorf("resolved_at missing on resolved job: %v", err)
+			case tc.resolved && resolvedAt.Type != bson.TypeDateTime:
+				t.Errorf("resolved_at type = %v, want datetime", resolvedAt.Type)
+			case !tc.resolved && err == nil:
+				t.Errorf("resolved_at = %v on pending job, want absent", resolvedAt)
+			}
+		})
 	}
 }
 

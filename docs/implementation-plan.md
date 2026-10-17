@@ -250,6 +250,8 @@ caller can query the collection); `stamped_by` is already wired and tested
 7.3 into 7.2-7.5 and 7.4 into 7.6-7.8.
 
 ### 7.1 GC and retention
+Done 2026-10-17.
+
 - Trust the server's TTL monitor; test only the shapes it acts on. No
   short-retention test (the monitor runs every 60s; lowering
   `ttlMonitorSleepSecs` mutates server-wide state)
