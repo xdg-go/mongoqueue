@@ -30,7 +30,7 @@ Read it before starting any subphase; do not improvise around it.
 - **Hermetic tests**: each test uses a uniquely named database/collection
   (random suffix) so parallel runs never collide; drop on cleanup.
 - **Exact assertions**: vstamps are integer arithmetic (`stride =
-  max(1, cost*1_000_000/weight)`), ties break by `_id`. Assert exact
+  max(1, cost*scale/weight)`, `scale = 1_000` since 6.5), ties break by `_id`. Assert exact
   vstamps and exact dispatch sequences, never ratios.
 - **Concurrency tests**: every outcome a race test accepts also has a
   deterministic, sequenced test that forces it. Race tests run under
@@ -80,6 +80,12 @@ newly-created and modified files as one logical unit.
        │
        ▼
 6.4 Public surface and docs
+       │
+       ▼
+6.5 Review follow-ups (leased fallback, SCALE 1e3, Reconcile errors)
+       │
+       ▼
+6.6 Service-clock frontier and partial indexes (supersedes 6.3/6.5 rule)
 ```
 
 Strictly sequential: 6.2 keys its walk on 6.1's entries, 6.3 extends the
@@ -654,8 +660,155 @@ seed is still `max pending or 0`.
 - [x] `Reconcile` attempts every partition, joins failures, and always
   walks (one failing partition no longer stalls marking and eviction);
   stops refreshing once ctx is done
-- [ ] Deferred: channel-gated test forcing a late refresh across a prune
-  and a recreated timeline (pins the accepted bounded dip)
+- [x] Deferred: channel-gated test forcing a late refresh across a prune
+  and a recreated timeline -- moved to 6.6 and re-scoped there
+
+## 6.6 Service-Clock Frontier and Index Consolidation (decided 2026-10-17)
+
+Replaces the frontier rule from 6.3 and 6.5 (min visible, else max leased).
+**6.6 supersedes every earlier statement in this file that defines the LWM
+as the minimum visible vstamp**, including 6.0 "LWM state" (`ok == false`
+now means "partition has no claimed and no pending job") and the 6.3/6.5
+test descriptions. Findings and reasoning: REVIEW.md (gitignored; codex
+review of d301de5) and the 2026-10-17 session.
+
+### Decision
+
+**LWM = the partition's service clock: the maximum vstamp among the
+partition's jobs that have ever been claimed** -- `claim_id > ""`, any
+liveness. Claim sets `claim_id`; Complete and Cancel leave it intact
+(`resolve.go`); only Release clears it. **Fallback, only when the clock
+query finds nothing** (partition never claimed, or its claimed history was
+GC'd): the minimum vstamp among the partition's pending jobs, any
+visibility. Neither found: `ok = false`, and `refreshLWM` keeps the prior
+value (unchanged). Keep plain overwrite in `refreshLWM` (no running max):
+the clock is monotone except for a Release of the top claimed job, GC, or a
+late refresh, all small dips.
+
+Why: every earlier rule failed one common case.
+
+| Rule | Failure |
+|---|---|
+| Min visible only (6.3) | Fully leased partition (workers keep up): no frontier, newcomer floored at stale value or 0 |
+| Min visible, else max leased (6.5, current code) | Partition with only delayed jobs: no frontier, newcomer at 0 beats a woken scheduled batch. Also: a long lease outlives later short jobs, so in a lull max leased falls back to the long job's stamp (credit) |
+| + min pending as third step | Works, but three conditional queries; a low-stamp Release retry pins it in delayed-only partitions |
+| Min over all pending, any state | A poison job retried via `Release(delay)` (keeps its vstamp), a long heartbeated job, or a long `Delay` pins the floor for its lifetime; unbounded credit |
+| First unclaimed (`claim_id == ""`), any visibility | Fully leased partition has none (finding #1 again); backoff retries and long delays pin it even in busy partitions |
+| Max leased first | O(backlog) scan: descends through every unclaimed job above the top lease (explain: 10,101 keys for a 10,000-job backlog) |
+| Clock from resolved jobs via the claim index | Lags by the in-flight window; scans every cancelled-before-claim job stamped above the clock |
+
+Accepted behavior of the clock: in a busy partition it sits about one
+stride below the next visible job (negligible). When low-stamped work
+re-enters the visible set (expired leases, a woken delayed batch, released
+retries), the newcomer lands behind it -- approximately FIFO, no credit.
+Release keeping its original vstamp stays as is (decided 2026-10-17): a
+worker cannot take a fresh stamp without the tenant's timeline, and the
+clock makes the question moot.
+
+### Indexes
+
+Explain check (2026-10-17, MongoDB 8.2.11, script kept at
+`scratchpad/explain.js` of that session; re-create it from this table): one
+partition with 2,000 claimed-and-resolved jobs, 50 cancelled-before-claim at
+high stamps, one long lease at 500, 20 in flight, 10,000 visible backlog,
+100 delayed, 5 released retries; plus a never-claimed delayed-only partition.
+
+| Query | Index | Keys | Docs |
+|---|---|---|---|
+| Claim (min visible) | claim (partial) | 27 | 1 |
+| Seed (tenant max pending) | seed (partial) | 1 | 0 |
+| Clock (max ever claimed) | clock | 1 | 0 |
+| Clock, never-claimed partition | clock | 0 | 0 |
+| Fallback (min pending) | claim (partial) | 1 | 0 |
+
+Target index set (all partial indexes; `liveness` and `claim_id` leave the
+claim index's keys):
+
+| Name | Keys | `partialFilterExpression` | Serves |
+|---|---|---|---|
+| claim | `{partition: 1, vstamp: 1, _id: 1, visible_at: 1}` | `{liveness: "pending"}` | Claim, fallback |
+| seed | `{tenant: 1, partition: 1, vstamp: -1}` | `{liveness: "pending"}` | Seed |
+| clock | `{partition: 1, vstamp: -1}` | `{claim_id: {$gt: ""}}` | Clock |
+| TTL | `{resolved_at: 1}` (unchanged, optional) | -- | GC |
+
+Index writes per job lifecycle are unchanged (7 vs 7): enqueue 2; first
+claim 2 (claim rewrite + clock insert); resolve 2 deletes (were rewrites);
+TTL removal 1 (was 2). Reclaim does not touch clock (keys unchanged);
+Release deletes the clock entry and the next claim re-adds it. Index size on
+the explain dataset fell from 794 KB to 573 KB. A query uses a partial index
+only if its filter implies the partial filter: every library query must
+keep `liveness: LivenessPending` (claim, seed, fallback) or
+`claim_id: {$gt: ""}` (clock) as a literal predicate. Old index specs are
+orphaned; nothing is released, so no migration.
+
+### 6.6.1 Frontier and indexes (`queue.go`, `claim.go`)
+- [ ] `computeLWM`: clock query (`partition`, `claim_id: {$gt: ""}`; sort
+  `{vstamp: -1}`; projection `{vstamp: 1, _id: 0}` so it is covered), then
+  the fallback (`partition`, `liveness: pending`; sort `{vstamp: 1}`;
+  covered) only on no result. Delete `leasedFilter`. `claimFilter` and
+  `claimSort` stay for `Claim`. Rewrite the godoc to state the rule and
+  why job state does not enter it
+- [ ] `EnsureIndexes`: the three partial indexes above; rewrite its godoc
+  (what each index serves, why each is partial, the write-cost note)
+- [ ] Update `lwmHook`/`refreshLWM`/`computeLWM` comments that say "no
+  visible pending job" or "delayed only"
+- [ ] **Test**: rewrite `TestComputeLWM` -- clock is the max claimed vstamp
+  across pending and resolved; a long lease at a low stamp does not lower
+  it; released retries (cleared fence), delayed and never-claimed jobs do
+  not raise or pin it; cancelled-before-claim jobs at high stamps are
+  ignored; never-claimed partition falls back to min pending (delayed jobs
+  count); empty partition `(0, false)`; other partitions ignored
+- [ ] **Test**: rewrite `TestEnsureIndexesCreatesClaimAndSeedIndexes` for
+  the new keys and partial filters
+- [ ] **Test**: delayed-only partition interleaves -- tenant `a` enqueues
+  and claim+completes `a-000`..`a-009` (clock 10×scale), then enqueues 5
+  jobs with `Delay`; fresh Queue (cold node), tenant `b` enqueues 5 jobs:
+  first stamp is 11×scale, not 1×scale. Make `a`'s delayed jobs visible
+  (write `visible_at` into the past) and drain: `a` and `b` alternate
+- [ ] **Test**: long lease does not pull the floor back -- claim `a-000`
+  and hold the lease (do not complete); claim+complete `a-001`..`a-009`;
+  cold seed for `b` stamps 11×scale (clock 10×scale), not 2×scale
+- [ ] **Test**: explain check as an integration test or recorded in the
+  mongodb doc (keys/docs per the table above); the stop rule from 6.3.1
+  applies -- report, do not add indexes beyond the three
+
+### 6.6.2 Test fallout and codex findings
+- [ ] Re-derive exact vstamps in every test whose expectations came from
+  min-visible: `TestLWM*` and `TestReconcile*` in `reconcile_test.go`,
+  `TestFairness*` in `fairness_test.go` where a claim precedes a cold
+  seed, `TestColdStartSeed`. Rename the two `AllLeased` tests to say what
+  they now prove. Keep each test's stated rule in its comment; change the
+  rule text only where the clock changes it. Re-run the verification
+  checklist after this step alone, before 6.6.3
+- [ ] Codex #1: `Reconcile` checks `ctx.Err()` at the top of each refresh
+  iteration, records it, breaks, and still walks
+- [ ] **Test** (codex #1): hook cancels ctx but returns success; assert no
+  further hook call and the walk ran
+- [ ] **Test** (codex #2): two partitions fail with distinct sentinel
+  errors, a third succeeds; `errors.Is` matches both sentinels and the
+  third partition's LWM was stored
+- [ ] **Test** (re-scoped from 6.5): channel-gated late refresh across a
+  prune and a recreated timeline -- the stored value is the late one (plain
+  overwrite) and the next walk/refresh corrects it. Write it only if it
+  stays short; otherwise record it in Future Phases
+
+### 6.6.3 Docs
+- [ ] Design doc "Low-water mark and the idle floor": the clock rule in one
+  sentence, the fallback, accepted overshoot behind re-visible low-stamped
+  work; drop the visible/leased/delayed case analysis. Add the rejected
+  rules from the Decision table to "Rejected alternatives"
+- [ ] Design doc lifecycle definitions (codex #3, ~line 483): the LWM no
+  longer reads the visible set; define a lease by its claim fence, distinct
+  from an unclaimed visibility delay
+- [ ] Design doc invariants ("Lease accounting" ~line 755): visibility
+  changes no longer move the sampled LWM; claims and releases do
+- [ ] mongodb doc: index section and explain check (replace the
+  2026-10-13 leased-fallback check); `computeLWM` access path
+- [ ] AGENTS.md "The model in brief": the frontier is the service clock,
+  not "the vstamp the next claim would take"
+- [ ] **Doc audit**: grep docs, godoc, and AGENTS.md for "frontier",
+  "visible", "leased fallback", "LWM", "low-water" and fix every statement
+  the clock contradicts
 
 ---
 
