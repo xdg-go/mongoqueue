@@ -335,9 +335,10 @@ func TestLWMLanesAreIndependent(t *testing.T) {
 	assertVStamp(ctx, t, q, "c-slow", 2*scale)
 }
 
-// TestLWMOtherLanePendingDoesNotRefund proves a re-seed reads only its own
-// lane's trailing edge: a's pending slow-lane job does not pull its fast-lane
-// timeline back (a shared timeline would re-seed to 1e3 and stamp a-f01 2e3).
+// TestLWMOtherLanePendingDoesNotRefund checks that a's pending slow-lane job
+// (1e3) does not pull its fast-lane re-seed below the fast lane's clock
+// (a-f00 at 12e3), so a-f01 is 13e3. The frontier floor alone yields 13e3,
+// so a shared timeline would stamp the same value.
 func TestLWMOtherLanePendingDoesNotRefund(t *testing.T) {
 	t.Parallel()
 

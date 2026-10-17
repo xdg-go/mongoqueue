@@ -793,20 +793,20 @@ orphaned; nothing is released, so no migration.
   stays short; otherwise record it in Future Phases
 
 ### 6.6.3 Docs
-- [ ] Design doc "Low-water mark and the idle floor": the clock rule in one
+- [x] Design doc "Low-water mark and the idle floor": the clock rule in one
   sentence, the fallback, accepted overshoot behind re-visible low-stamped
   work; drop the visible/leased/delayed case analysis. Add the rejected
   rules from the Decision table to "Rejected alternatives"
-- [ ] Design doc lifecycle definitions (codex #3, ~line 483): the LWM no
+- [x] Design doc lifecycle definitions (codex #3, ~line 483): the LWM no
   longer reads the visible set; define a lease by its claim fence, distinct
   from an unclaimed visibility delay
-- [ ] Design doc invariants ("Lease accounting" ~line 755): visibility
+- [x] Design doc invariants ("Lease accounting" ~line 755): visibility
   changes no longer move the sampled LWM; claims and releases do
-- [ ] mongodb doc: index section and explain check (replace the
+- [x] mongodb doc: index section and explain check (replace the
   2026-10-13 leased-fallback check); `computeLWM` access path
-- [ ] AGENTS.md "The model in brief": the frontier is the service clock,
+- [x] AGENTS.md "The model in brief": the frontier is the service clock,
   not "the vstamp the next claim would take"
-- [ ] **Doc audit**: grep docs, godoc, and AGENTS.md for "frontier",
+- [x] **Doc audit**: grep docs, godoc, and AGENTS.md for "frontier",
   "visible", "leased fallback", "LWM", "low-water" and fix every statement
   the clock contradicts
 

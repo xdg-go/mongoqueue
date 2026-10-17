@@ -13,7 +13,8 @@ the caller above the primitive.
   `cost / weight`. Workers claim the lowest visible `(vstamp, job id)`. Heavier
   weight and cheaper jobs sort earlier; a tenant flooding work pushes its own
   later jobs back. Fairness is memoryless: a new or returning tenant is floored
-  to its partition's dispatch frontier (the vstamp the next claim would take),
+  to its partition's dispatch frontier -- the service clock, the max vstamp
+  ever claimed there (falling back to min pending when nothing was) --
   so it joins at the point of service with no credit for idle time and no
   penalty behind others' backlogs.
 - **Stamp at enqueue, claim at dispatch.** Fairness is computed on the

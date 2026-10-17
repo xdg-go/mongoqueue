@@ -65,7 +65,7 @@ that have pending work there, by their present weights. Past idleness earns a
 tenant no credit and costs it no penalty. Within a tenant, dispatch is FIFO.
 Across tenants, already-enqueued work is slowed by another tenant's arrival,
 never jumped: a tenant that becomes backlogged is placed one stride past the
-job the partition will serve next, exactly where it would be had it been
+last job the partition served, exactly where it would be had it been
 active all along and just finished its previous work. This is the placement
 rule of start-time fair queueing (`start = max(own finish, system virtual
 time)`); the low-water mark below is the system virtual time. The floor sets
@@ -219,44 +219,42 @@ memory; an evicted tenant is re-seeded the same way on its next enqueue.
 
 ### Low-water mark and the idle floor
 
-The **low-water mark** (LWM) of a partition is its **dispatch frontier**: the
-minimum vstamp among the partition's visible pending jobs, i.e. the vstamp the
-next claim in that partition would take. It is the system virtual time of
-start-time fair queueing, and it is per partition because each partition has
-its own point of service. Only *visible* jobs count: a leased or delayed job
-with a low vstamp is not about to be served, and letting it hold the frontier
-low would hand every newcomer stale credit.
+The **low-water mark** (LWM) of a partition is its **dispatch frontier**,
+defined as the partition's **service clock**: the maximum vstamp among the
+partition's jobs that have ever been claimed. A claim sets the job's claim
+fence; completion and cancellation keep it; only an early release clears it.
+It is the system virtual time of start-time fair queueing (the start tag of
+the work most recently put into service), and it is per partition because
+each partition has its own point of service.
 
-When no job is visible, the frontier is the vstamp most recently put into
-service: the maximum vstamp among the partition's **leased** jobs. This is
-start-time fair queueing's answer for a server with nothing waiting (system
-virtual time is the start tag of the work in service), and it is the common
-case, not an edge: a partition whose workers keep up has every pending job
-leased most of the time. Delayed jobs, never claimed or released with a
-delay, are not in service and do not count. A partition with no visible and
-no leased job -- empty, or holding only delayed jobs -- has no frontier.
+Only when nothing in the partition has ever been claimed, or its claimed
+history has been garbage-collected, does the LWM fall back to the minimum
+vstamp among the partition's pending jobs, visible or not. A partition with
+neither -- no claimed history and no pending job -- has no frontier.
+
+Visibility and lease timing do not enter the clock. A frontier read from the
+visible set vanishes whenever workers keep up (every pending job leased) or
+only delayed work remains, so newcomers fall to a stale value or 0 and jump
+ahead of work already scheduled. A minimum over pending jobs lets one long
+lease, a released retry, or a long delay pin the floor for its lifetime. The
+maximum ever claimed advances only with service.
+
+The clock overshoots in one accepted way. In a busy partition it sits about
+one stride below the next visible job, which is negligible. When low-stamped
+work re-enters the visible set -- an expired lease, a delayed batch coming
+due, a released retry -- the clock stays where service left it, and a
+newcomer lands behind that work: approximately FIFO, never credit.
 
 The LWM is soft state like vtime itself, computed on the stamping node and not
 held consistent across the fleet. A node refreshes a partition's LWM when it
 first creates a timeline in that partition (so a new or returning tenant is
 floored correctly even on a node that never reconciles) and on every
-reconciliation. It is the last computed frontier, not a running maximum: the
-frontier can move backward when a delayed job turns visible or an expired
-lease re-enters the visible set, and the floor follows it, because the floor's
-job is to place a tenant at the actual point of service. A computation that
-finds no frontier leaves the previous value in place (0 on a node with none),
-which places a newcomer at or below the old point of service; only delayed
-work remains to compete with it, and that work carries its tenant's own
-enqueue-time stamps.
-
-Holding the old value instead of falling back to leased jobs was rejected.
-The stored frontier is refreshed only when a computation finds one, so in a
-partition that stays fully leased it ages without bound, and a cold node has
-no value at all. A newcomer seeded there is stamped far below incumbents'
-trailing edges. Once contention begins, its low stamps define the visible
-frontier, so its re-seeds stay low too, and it monopolizes the partition
-until its vtime catches up: unbounded idle credit, which memoryless placement
-exists to prevent.
+reconciliation. It is the last computed frontier, not a running maximum. The
+clock is monotone with two exceptions. A release of the top claimed job is a
+small dip. Garbage collection lowers the clock only once the partition's
+claimed history is gone; the LWM then falls back to the minimum pending vstamp
+(see above), which can be much lower. A computation that finds no frontier
+leaves the previous value in place (0 on a node with none).
 
 Refreshes are not sequenced against each other. A refresh that finishes late
 may overwrite a newer frontier with an older, lower one. The dip is bounded by
@@ -284,18 +282,18 @@ The floor raises a lagging timeline only. It does not pull down a timeline
 whose vtime sits too high -- that case is cancellation.
 
 Worked example, one partition, equal weights. Tenant b has jobs stamped 1..20
-and the first ten have been served, so the frontier is 11. Tenant a drained
-long ago with a cached vtime of 3. A reconciliation has since run, so a's entry is
-stale (or evicted) and the partition's LWM is 11. a now enqueues again; it
-has no trailing edge, so its re-seed takes the LWM alone. With no floor its
-job is stamped 4 and dispatches before b's ten remaining jobs (stale credit).
-Floored to the frontier it is stamped 12 and interleaves with b from the next
-claim. If a enqueues twenty jobs they are stamped 12..31 and alternate with
-b's 11..20 one for one: b finishes at the nineteenth claim instead of the
-tenth, a at the thirtieth, each having had half the capacity while both were
-backlogged. A floor at b's trailing edge (20) would instead have stamped a's
-first job 21, behind b's entire remaining backlog, which is tenant-level FIFO
-rather than fair sharing.
+and the first ten have been served, so the frontier is 10. Tenant a drained
+long ago with a cached vtime of 3. A reconciliation has since run, so a's
+entry is stale (or evicted) and the partition's LWM is 10. a now enqueues
+again; it has no trailing edge, so its re-seed takes the LWM alone. With no
+floor its job is stamped 4 and dispatches before b's ten remaining jobs (stale
+credit). Floored to the frontier it is stamped 11 and interleaves with b from
+the next claim. If a enqueues twenty jobs they are stamped 11..30 and
+alternate with b's 11..20 one for one: b finishes at about the twentieth claim
+instead of the tenth, a at the thirtieth, each having had half the capacity
+while both were backlogged. A floor at b's trailing edge (20) would instead
+have stamped a's first job 21, behind b's entire remaining backlog, which is
+tenant-level FIFO rather than fair sharing.
 
 ### Cancellation and vtime
 
@@ -481,11 +479,15 @@ jobs in flight:
   losing the tenant's place.
 - **visible** -- pending jobs whose visibility time has passed. This is the
   claim set: the dispatch index orders by vstamp over visible jobs within the
-  claimed partition and claims the minimum. The low-water mark is the minimum
-  of this set within a partition; it reads visible jobs only, because a leased
-  or delayed job is not about to be served and must not hold the floor low.
-- **leased** -- pending jobs whose visibility time lies in the future. In
-  flight, excluded from claim, still counted as backlog.
+  claimed partition and claims the minimum. The low-water mark does not read
+  this set; it is the partition's service clock, read from claim fences (see
+  "Low-water mark and the idle floor").
+- **leased** -- pending jobs that hold a claim fence whose visibility time
+  lies in the future. In flight, excluded from claim while the lease lasts,
+  still counted as backlog. A lapsed lease keeps its fence but is visible
+  again. A job whose visibility time lies in the future without a fence
+  (enqueued with a delay, or released with one) is delayed, not leased, and
+  has not been put into service.
 
 A fresh job is visible at once; a claimed job is invisible until its lease
 lapses; a lapsed lease makes the job visible again. *Visible* therefore
@@ -654,7 +656,7 @@ size-class lanes, runtime caps, and per-tenant concurrency caps.
 low-rate tenant prompt service rather than burying it behind a heavy backlog --
 the property that keeps interactive work responsive amid batch floods. A
 returning tenant is floored to its partition's dispatch frontier, so its first
-job lands one stride past the job about to be served: it joins at the point of
+job lands one stride past the last job served: it joins at the point of
 service, neither jumping work already being served nor waiting behind another
 tenant's backlog. This gives a sparse tenant latency (its one job is near the
 front) without giving it throughput it has not earned (its tenth job in a burst
@@ -718,8 +720,11 @@ for tenants long gone idle. Neither threatens correctness -- the design tolerate
 but both grow unbounded without a sweep. (An expired lease is not a resolved
 record; it re-enters the visible set and still dispatches, so it is not GC's
 concern.) The terminal write records a resolution timestamp so reclamation
-has a durable key to age on. An implementation should reclaim resolved
-records on some cadence
+has a durable key to age on. Resolved records also carry the service clock
+(the LWM reads claimed jobs of any liveness), so retention should comfortably
+exceed the time between claims in a partition; once a partition's claimed
+history is reclaimed, its LWM falls back to the minimum pending vstamp. An
+implementation should reclaim resolved records on some cadence
 and evict idle-tenant cache entries (an evicted tenant is re-seeded to the
 greater of its trailing edge and the LWM on its next enqueue, the onboarding
 path, so eviction is safe). Treat this
@@ -753,8 +758,8 @@ A model or test suite should establish:
 - **Lease accounting:** an in-flight (leased) job counts toward its tenant's
   backlog; reclaim preserves the job's original vstamp; lease expiry,
   stealing, heartbeats, and early release do not alter any stamp or vtime.
-  Visibility changes do move the sampled low-water mark, since the frontier is
-  defined over visible jobs (and over leased jobs when none is visible).
+  Visibility changes do not move the sampled low-water mark; claims and
+  releases do, since the frontier is the maximum vstamp among claimed jobs.
 - **Enqueue accounting:** a tenant's cached vtime advances only when the
   job's durable insert succeeds; a failed or duplicate insert advances
   nothing. (Compute the stamp speculatively, commit the cache advance on
@@ -826,6 +831,29 @@ behind the entire remaining backlog of the shallowest active tenant -- with one
 tenant 600 jobs deep, a newcomer's first job waits behind all 600 -- which is
 tenant-level FIFO, not fair sharing, and contradicts the idealized-fair-server
 model above. The dispatch frontier is the quantity that model specifies.
+
+**Frontier rules read from job state.** Several definitions of the dispatch
+frontier were tried before the service clock, and each failed a common case.
+*Minimum visible vstamp only*: a fully leased partition, the normal state when
+workers keep up, has no frontier, so a newcomer is floored at a stale value or
+zero. *Minimum visible, else maximum leased*: a partition holding only delayed
+jobs has no frontier, so a newcomer at 0 beats a scheduled batch when it comes
+due; and a long lease outlives later short jobs, so in a lull the frontier
+falls back to the long job's old stamp, which is credit. *Adding the minimum
+pending vstamp as a third step*: it works, but costs three conditional reads,
+and a low-stamped released retry pins the floor in a delayed-only partition.
+*Minimum over all pending jobs, any state*: a poison job retried by early
+release keeps its old vstamp, and it, a long heartbeated job, or a long delay
+pins the floor for its lifetime -- unbounded credit. *First never-claimed job,
+any visibility*: a fully leased partition has none, and backoff retries and
+long delays pin it even in busy partitions. *Maximum leased first, then the
+rest*: finding the top lease means scanning past every unclaimed job above
+it, a cost proportional to the backlog. *Clock from resolved jobs only*: it
+lags by the in-flight window and must skip every job cancelled before claim
+that is stamped above the clock. Holding the last computed value instead of
+any fallback was also rejected: in a partition that stays fully leased it
+ages without bound, a cold node has no value at all, and a newcomer seeded
+there monopolizes the partition until its vtime catches up.
 
 **Idle credit.** Letting a returning tenant keep its stale vtime (no floor), or
 flooring it some fixed allowance below the frontier (a CFS-style sleeper

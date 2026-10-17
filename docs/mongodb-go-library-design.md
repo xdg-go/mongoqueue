@@ -246,12 +246,13 @@ frontier refresh does not stop the others or the walk: `Reconcile` attempts
 every partition, returns the failures joined, and marks and evicts
 regardless, so one failing partition cannot stall drift correction or
 eviction for the rest. A re-seed in a partition whose refresh failed uses the
-frontier stored earlier. A context already done on entry skips everything. A
-cold seed (the first enqueue on a (tenant, partition) this node has no entry
-for) refreshes that partition's frontier itself, so new and returning tenants
-are floored correctly even on a node that never calls `Reconcile`. Without
-`Reconcile`, cache drift for active timelines is never corrected and the cache
-never shrinks.
+frontier stored earlier. A context already done on entry skips everything; one
+that ends mid-call stops further refreshes, is reported, and the walk still
+runs. A cold seed (the first enqueue on a (tenant, partition) this node has
+no entry for) refreshes that partition's frontier itself, so new and
+returning tenants are floored correctly even on a node that never calls
+`Reconcile`. Without `Reconcile`, cache drift for active timelines is never
+corrected and the cache never shrinks.
 
 `kind` is a payload field, so it rides on the `Kind[T]` binding rather than in
 `EnqueueOpts`. The binding is its only writer and pairs a stable `kind` with
@@ -479,27 +480,97 @@ errors pass through wrapped.
 
 ## Indexes, contention, and GC
 
-**Claim index:** `{partition: 1, liveness: 1, vstamp: 1, _id: 1, visible_at:
-1, claim_id: 1}`. The first four fields serve the claim filter and its
-`(vstamp, _id)` sort; `visible_at` rides in the index so the visibility
-predicate filters in-index without fetching documents. The leased low-vstamp
-prefix is still scanned past on every claim, but as index entries only.
-`claim_id` rides along for the frontier's leased fallback (below). It adds no
-index writes: every update that changes `claim_id` (claim, release) also
-changes `visible_at`, so the entry is rewritten anyway; it only widens each
-key.
+`EnsureIndexes` creates three partial indexes, named so a re-call is a
+server-side no-op:
 
-**Seed index:** `{tenant: 1, partition: 1, liveness: 1, vstamp: -1}`. Serves
-the per-(tenant, partition) trailing-edge query -- the maximum pending vstamp
-on one timeline -- that seeds and re-seeds the vtime cache. The claim index
-cannot serve it (it leads with `partition` and sorts `vstamp` ascending over
-all tenants). The low-water mark needs no index of its own: a partition's
-dispatch frontier is the claim filter with a `vstamp` projection, served by
-the claim index exactly as a claim is. When that finds nothing, a second read
-takes the maximum vstamp among leased jobs (`claim_id` > `""`, sorted
-`(vstamp, _id)` descending), a backward scan of the same index. All these
-reads go through the primary-routed collection handle (see "Lease contracts"
-on read concern).
+| Name | Keys | `partialFilterExpression` | Serves |
+|---|---|---|---|
+| `mongoqueue_claim` | `{partition: 1, vstamp: 1, _id: 1, visible_at: 1}` | `{liveness: "pending"}` | Claim; frontier fallback |
+| `mongoqueue_seed` | `{tenant: 1, partition: 1, vstamp: -1}` | `{liveness: "pending"}` | Seed (trailing edge) |
+| `mongoqueue_clock` | `{partition: 1, vstamp: -1}` | `{claim_id: {$gt: ""}}` | Frontier service clock |
+
+**Claim index.** The leading keys serve the claim filter and its `(vstamp,
+_id)` sort; `visible_at` rides in the index so the visibility predicate
+filters in-index without fetching documents. The leased and delayed
+low-vstamp prefix is still scanned past on every claim, but as index entries
+only.
+
+**Seed index.** Serves the per-(tenant, partition) trailing-edge query -- the
+maximum pending vstamp on one timeline -- that seeds and re-seeds the vtime
+cache. The claim index cannot serve it (it leads with `partition` and sorts
+`vstamp` ascending over all tenants).
+
+**Clock index.** Serves the dispatch frontier (`computeLWM`), the partition's
+service clock: the maximum vstamp among jobs ever claimed, `claim_id` set,
+any liveness. Claim sets `claim_id`, Complete and Cancel keep it, and only
+Release clears it, so the index holds exactly the claimed history.
+
+**Why partial.** Each index holds only the jobs its queries can match:
+resolved jobs leave the claim and seed indexes, and never-claimed or released
+jobs stay out of the clock index. The partial-filter predicate therefore
+leaves the keys. MongoDB uses a partial index only when the query filter
+implies the partial filter, so every library query must keep `liveness:
+"pending"` (claim, seed, fallback) or `claim_id: {$gt: ""}` (clock) as a
+literal predicate; computing either predicate some other way silently drops
+the query off its index.
+
+**Write cost.** The three partial indexes cost no more index writes over a
+job's lifecycle than the two full indexes they replaced (7 each): enqueue inserts
+2 entries; the first claim rewrites the claim entry and inserts the clock
+entry; resolution deletes the claim and seed entries; TTL removal deletes
+the clock entry. A reclaim leaves the clock entry alone (its keys do not
+change); Release deletes it and the next claim re-adds it. Index size on the
+2026-10-17 measurement dataset (see the explain check below) fell from 794
+KB to 573 KB.
+
+**Earlier indexes.** Indexes from earlier versions,
+`partition_1_liveness_1_vstamp_1__id_1_visible_at_1_claim_id_1` and
+`tenant_1_partition_1_liveness_1_vstamp_-1`, are not dropped. They serve no
+query and add write cost; the operator can drop them. Nothing was released
+with them, so there is no migration.
+
+**Frontier access path.** `computeLWM` issues at most two `FindOne` reads on
+the primary-routed handle, each with projection `{vstamp: 1, _id: 0}` so it
+is covered (no document fetch). The clock query, filter `{partition,
+claim_id: {$gt: ""}}` sorted `{vstamp: -1}`, reads the first entry of the
+clock index. Only when it finds nothing (partition never claimed, or its
+claimed history GC'd) does the fallback run: filter `{partition, liveness:
+"pending"}` sorted `{vstamp: 1}`, the first entry of the claim index, any
+visibility. All these reads go through the primary-routed collection handle
+(see "Lease contracts" on read concern).
+
+**Explain check (2026-10-17, MongoDB 8.2.11).** A one-off measurement script,
+not kept in the repository, on one partition with 2,000 claimed-and-resolved
+jobs, 50 cancelled-before-claim at high stamps, one long lease at a low stamp,
+20 in flight, a 10,000-job visible backlog, 100 delayed jobs, and 5 released
+retries; plus a never-claimed, delayed-only partition.
+
+| Query | Index | Keys | Docs |
+|---|---|---:|---:|
+| Claim (min visible) | `mongoqueue_claim` | 27 | 1 |
+| Seed (tenant max pending) | `mongoqueue_seed` | 1 | 0 |
+| Clock (max ever claimed) | `mongoqueue_clock` | 1 | 0 |
+| Clock, never-claimed partition | `mongoqueue_clock` | 0 | 0 |
+| Fallback (min pending) | `mongoqueue_claim` | 1 | 0 |
+
+Interpretation: the clock, seed, and fallback reads each examine one key and
+fetch nothing, independent of backlog size. The claim scans the invisible
+prefix below the first visible job (the long lease, in-flight jobs) and
+fetches one document. Cancelled-before-claim jobs never enter the clock
+index, so the clock does not scan past them.
+
+`explain_test.go` (`TestExplainQueriesUseIndexes`) re-checks the plan shape
+on a smaller fixture: 300 resolved, 20 in flight, one long lease, 5
+released, a 2,000-job backlog, 100 delayed, and 50 cancelled-before-claim,
+plus a never-claimed partition with 10 delayed jobs. For the claim, seed,
+clock (both partitions), and fallback reads it asserts the winning index
+name, no COLLSCAN or blocking SORT, covered seed/clock/fallback reads (no
+documents examined), and keys examined bounded independent of backlog: 1
+for the covered reads, 1 + in-flight + 1 for the claim.
+
+The checks below date from before 2026-10-17 and ran against the old full
+indexes; the claim and seed scan shapes are unchanged (`liveness` was a point
+bound and is now the partial filter).
 
 **Explain check (2026-10-09, MongoDB 8.2.11).** One partition seeded with
 10,000 pending jobs at low vstamps with `visible_at` a year in the future,
@@ -531,51 +602,6 @@ filter `{tenant: "b", partition: "p2", liveness: "pending"}`, sort
 `partition`, and `liveness`, `vstamp [MaxKey, MinKey]`. No `SORT` stage.
 `totalKeysExamined` 1, `totalDocsExamined` 1, `nReturned` 1: the trailing
 edge is the first index entry for the timeline.
-
-**Frontier explain check (2026-10-13, MongoDB 8.2.11).** Explain
-(`executionStats`) on `computeLWM`: one `FindOne` on the primary with the
-claim filter (`partition`, `liveness: "pending"`,
-`$expr: {$lte: ["$visible_at", "$$NOW"]}`, shared with Claim via
-`claimFilter`), sort `{vstamp: 1, _id: 1}`, projection `{vstamp: 1}`, limit
-1. Fixture in the claim check's shape: partition `a` has 100 visible pending
-jobs; partition `b` has 10,000 leased pending jobs at vstamps 0..9999e6
-(`claim_id` set, `visible_at` a year ahead), then 100 visible at higher
-vstamps; partition `c` has 1,000 pending jobs, all leased. Winning plan in
-every case: `LIMIT 1` ← `PROJECTION_SIMPLE` ← `FETCH` (residual `$expr`
-filter) ← forward `IXSCAN` on
-`partition_1_liveness_1_vstamp_1__id_1_visible_at_1`, point bounds on
-`partition` and `liveness`, `vstamp`/`_id` `[MinKey, MaxKey]`,
-`visible_at [MinKey, <$$NOW>]`. No rejected plans, no `SORT` stage.
-
-| Partition                  | `totalKeysExamined` | `totalDocsExamined` | `nReturned` |
-|----------------------------|--------------------:|--------------------:|------------:|
-| `a` (all visible)          | 1                   | 1                   | 1           |
-| `b` (10,000 leased prefix) | 10,001              | 1                   | 1           |
-| `c` (all 1,000 leased)     | 1,000               | 0                   | 0           |
-
-Interpretation: the frontier reuses the claim index and plan and adds no
-index, so it adds no write amplification. Its cost tracks the claim's:
-linear in the leased/delayed prefix in index keys, never in documents. An
-all-invisible partition walks its whole pending index range and fetches
-nothing. It runs once per cold seed and once per cached partition per
-`Reconcile` call. (These checks predate `claim_id` joining the claim index as
-a trailing key, which cannot change their bounds.)
-
-**Leased-fallback explain check (2026-10-13, MongoDB 8.2.11).** Partition
-`c` holds 1,000 leased jobs at vstamps 0..999e3 (`claim_id` set) and, above
-them, 200 delayed jobs at 1000e3..1199e3 (`claim_id` empty); all have
-`visible_at` a year ahead. Explain (`executionStats`) on the fallback: filter
-`{partition: "c", liveness: "pending", claim_id: {$gt: ""}}`, sort
-`{vstamp: -1, _id: -1}`, projection `{vstamp: 1}`, limit 1. Winning plan:
-`LIMIT` ← `PROJECTION_COVERED` ← backward `IXSCAN` on
-`partition_1_liveness_1_vstamp_1__id_1_visible_at_1_claim_id_1`, point bounds
-on `partition` and `liveness`, `claim_id ("", {})`. No rejected plans, no
-`SORT`, no `FETCH`. `totalKeysExamined` 201, `totalDocsExamined` 0,
-`nReturned` 1 (vstamp 999e3).
-
-Interpretation: the fallback is covered by the index. It examines one key
-per delayed job above the highest lease, plus one, and fetches nothing. It
-runs only when the visible read finds nothing.
 
 **Benchmark (2026-10-10, MongoDB 8.2.11).** `make bench`
 (`BenchmarkClaimComplete`, 2,000 jobs per sub-benchmark), median of three
@@ -626,7 +652,7 @@ this to be a problem, a database might be the wrong coordination mechanism.
 **Index creation is caller-invoked, never automatic.** The library exposes
 two methods and creates nothing on init:
 
-- `EnsureIndexes(ctx)` -- the claim index (and any other operational indexes).
+- `EnsureIndexes(ctx)` -- the claim, seed, and clock indexes.
 - `EnsureTTLIndex(ctx, retention)` -- the GC TTL index, with a caller-supplied
   retention duration.
 
@@ -638,7 +664,11 @@ either.
 
 **GC.** The terminal write sets `resolved_at`. `EnsureTTLIndex` keys the TTL
 index on it; there is no default retention and no TTL index unless the caller
-invokes it. Retention is validated to `[1s, math.MaxInt32 s]` (~68 years):
+invokes it. Resolved jobs keep their `claim_id`, so they stay in the clock
+index and carry the frontier's service clock until TTL removes them: retention
+should comfortably exceed the time between claims in a partition, or the
+frontier drops to the min-pending fallback once a partition's claimed
+history is gone. Retention is validated to `[1s, math.MaxInt32 s]` (~68 years):
 MongoDB's TTL granularity is whole seconds, so a sub-second or non-positive
 retention would truncate to `expireAfterSeconds: 0` and delete every resolved
 job the instant it resolves. `EnsureTTLIndex` rejects an out-of-range retention
@@ -667,7 +697,7 @@ a rebuild.
 
 1. **Dispatch helper.** Whether to ship a caller-side `Kind` → handler `Mux`
    (asynq-style) as an optional layer above the primitive. Undecided.
-2. **Reconciliation/LWM index.** Closed: no new index; see "Indexes,
+2. **Reconciliation/LWM index.** Closed: the clock index; see "Indexes,
    contention, and GC".
 3. **Reconciliation and cache surface.** Closed: caller-driven `Reconcile`;
    see "Vtime cache and `Reconcile`" in "The Enqueue API".
