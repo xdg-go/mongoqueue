@@ -43,7 +43,8 @@ type plannedJob struct {
 // planTenant returns n jobs prefix-000.. on a tenant seeded at base, with
 // vstamps base + k*stride(cost, weight) for k = 1..n, where
 // stride = max(1, cost*scale/weight). A tenant's base is the partition's
-// frontier when its cold seed runs (0 if nothing is visible).
+// frontier when its cold seed runs: its service clock (max claimed vstamp),
+// else its min pending vstamp, else 0.
 func planTenant(prefix string, n int, base, cost, weight int64) []plannedJob {
 	stride := max(1, cost*scale/weight)
 	jobs := make([]plannedJob, n)

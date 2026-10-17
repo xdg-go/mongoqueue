@@ -170,25 +170,27 @@ func jobIDs(prefix string, from, to int) []string {
 }
 
 // setupIdleReturn drains tenant a (cached vtime 3e3), then stamps b-000..b-019
-// at 1e3..20e3 (its cold seed finds no frontier) and drains b-000..b-009,
-// leaving the default partition's frontier at 11e3, then reconciles.
+// at 4e3..23e3 (its cold seed floors at the clock, a-002 at 3e3) and drains
+// b-000..b-009, leaving the default partition's clock at 13e3, then
+// reconciles.
 func setupIdleReturn(ctx context.Context, t *testing.T, q *Queue) {
 	t.Helper()
 	enqueueTenant(ctx, t, q, 3, EnqueueOpts{TenantID: "a", Cost: 1, Weight: 1})
 	claimComplete(ctx, t, q, "", jobIDs("a", 0, 3)...)
 
 	enqueueTenant(ctx, t, q, 20, EnqueueOpts{TenantID: "b", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q, "b-000", scale)
-	assertVStamp(ctx, t, q, "b-019", 20*scale)
+	assertVStamp(ctx, t, q, "b-000", 4*scale)
+	assertVStamp(ctx, t, q, "b-019", 23*scale)
 	claimComplete(ctx, t, q, "", jobIDs("b", 0, 10)...)
 
 	mustReconcile(ctx, t, q)
 }
 
 // TestLWMIdleTenantResumesAtFrontier proves a returning tenant is floored to
-// the partition's dispatch frontier: no credit for idle time (stale vtime
-// would stamp a-003 at 4e3) and no burial behind the backlog (a trailing-edge
-// floor would stamp it at 21e3).
+// the partition's service clock: no credit for idle time (stale vtime would
+// stamp a-003 at 4e3) and no burial behind the backlog (a trailing-edge
+// floor would stamp it at 24e3). The stale re-seed is max(a's trailing edge
+// 0, clock 13e3) + stride = 14e3.
 func TestLWMIdleTenantResumesAtFrontier(t *testing.T) {
 	t.Parallel()
 
@@ -199,10 +201,10 @@ func TestLWMIdleTenantResumesAtFrontier(t *testing.T) {
 	setupIdleReturn(ctx, t, q)
 
 	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "a-003", TenantID: "a", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q, "a-003", 12*scale)
+	assertVStamp(ctx, t, q, "a-003", 14*scale)
 
-	// a-003 ties b-011 at 12e3 and wins on id.
-	want := append([]string{"b-010", "a-003"}, jobIDs("b", 11, 20)...)
+	// a-003 ties b-010 at 14e3 and wins on id.
+	want := append([]string{"a-003"}, jobIDs("b", 10, 20)...)
 	assertOrder(t, drainOrder(ctx, t, q, ""), want)
 }
 
@@ -221,20 +223,22 @@ func TestLWMReturningTenantFloodsAtShare(t *testing.T) {
 	for i := 3; i < 23; i++ {
 		enqueueJob(ctx, t, q, EnqueueOpts{JobID: fmt.Sprintf("a-%03d", i), TenantID: "a", Cost: 1, Weight: 1})
 	}
-	assertVStamp(ctx, t, q, "a-003", 12*scale)
-	assertVStamp(ctx, t, q, "a-022", 31*scale)
+	assertVStamp(ctx, t, q, "a-003", 14*scale)
+	assertVStamp(ctx, t, q, "a-022", 33*scale)
 
-	want := []string{"b-010"}
-	for i := range 9 {
-		want = append(want, fmt.Sprintf("a-%03d", 3+i), fmt.Sprintf("b-%03d", 11+i))
+	// a-(3+i) ties b-(10+i) at (14+i)e3 and wins on id.
+	var want []string
+	for i := range 10 {
+		want = append(want, fmt.Sprintf("a-%03d", 3+i), fmt.Sprintf("b-%03d", 10+i))
 	}
-	want = append(want, jobIDs("a", 12, 23)...)
-	// b drains at claim 19 (b-019), a at claim 30 (a-022).
+	want = append(want, jobIDs("a", 13, 23)...)
+	// b drains at claim 20 (b-019), a at claim 30 (a-022).
 	assertOrder(t, drainOrder(ctx, t, q, ""), want)
 }
 
 // TestLWMColdNodeFloorsNewTenant proves a cold seed refreshes the frontier, so
-// a node that never reconciles still floors a new tenant.
+// a node that never reconciles still floors a new tenant: b-000..b-009 at
+// 1e3..10e3 were claimed, so the clock is 10e3 and c-000 is 11e3, not 1e3.
 func TestLWMColdNodeFloorsNewTenant(t *testing.T) {
 	t.Parallel()
 
@@ -247,7 +251,7 @@ func TestLWMColdNodeFloorsNewTenant(t *testing.T) {
 
 	q2 := New(db.Collection("jobs"))
 	enqueueJob(ctx, t, q2, EnqueueOpts{JobID: "c-000", TenantID: "c", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q2, "c-000", 12*scale)
+	assertVStamp(ctx, t, q2, "c-000", 11*scale)
 }
 
 // claimN claims n jobs in partition and leaves them leased.
@@ -258,12 +262,11 @@ func claimN(ctx context.Context, t *testing.T, q *Queue, partition string, n int
 	}
 }
 
-// TestLWMColdNodeAllLeasedFloorsAtLastDispatch proves a cold seed in a
-// partition with nothing visible floors a new tenant at the most recently
-// dispatched vstamp. Every b job is leased, so the visible frontier is empty;
-// without the leased fallback c would start at 0 and be stamped 1e3, ahead
-// of all b's future work.
-func TestLWMColdNodeAllLeasedFloorsAtLastDispatch(t *testing.T) {
+// TestLWMColdNodeFullyLeasedFloorsAtClock proves the frontier does not depend
+// on the visible set: every b job is leased, so nothing is visible, yet a
+// cold seed floors c at the clock (b-019 at 20e3) rather than at 0, which
+// would stamp c-000 at 1e3, ahead of all b's future work.
+func TestLWMColdNodeFullyLeasedFloorsAtClock(t *testing.T) {
 	t.Parallel()
 
 	db := mongotest.Connect(t)
@@ -278,13 +281,14 @@ func TestLWMColdNodeAllLeasedFloorsAtLastDispatch(t *testing.T) {
 	assertVStamp(ctx, t, q2, "c-000", 21*scale)
 }
 
-// TestLWMWarmNodeAllLeasedTracksDispatch proves a reconcile that finds
-// nothing visible still advances the stored frontier to the most recently
-// dispatched vstamp. Tenant a stays cached (touched between reconciles), so
-// its last enqueue re-seeds from the stored frontier rather than refreshing
-// it; keeping the frontier from before the partition went fully leased
-// (11e3) would stamp a-002 at 13e3.
-func TestLWMWarmNodeAllLeasedTracksDispatch(t *testing.T) {
+// TestLWMWarmNodeReconcileAdvancesClock proves a reconcile advances the stored
+// frontier to the clock even when the partition is fully leased and nothing
+// is visible. Tenant a stays cached (touched between reconciles), so its last
+// enqueue re-seeds from the stored frontier rather than refreshing it.
+// a-000 (1e3) is claimed first, so b's cold seed stamps b-000..b-019 at
+// 2e3..21e3. Keeping the frontier from before the partition went fully
+// leased (11e3) would stamp a-002 at max(a-001 12e3, 11e3) + 1e3 = 13e3.
+func TestLWMWarmNodeReconcileAdvancesClock(t *testing.T) {
 	t.Parallel()
 
 	db := mongotest.Connect(t)
@@ -294,22 +298,24 @@ func TestLWMWarmNodeAllLeasedTracksDispatch(t *testing.T) {
 	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "a-000", TenantID: "a", Partition: "p", Cost: 1, Weight: 1})
 	claimComplete(ctx, t, q, "p", "a-000")
 	enqueueTenant(ctx, t, q, 20, EnqueueOpts{TenantID: "b", Partition: "p", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q, "b-019", 20*scale)
+	assertVStamp(ctx, t, q, "b-019", 21*scale)
 	claimN(ctx, t, q, "p", 10)
-	mustReconcile(ctx, t, q) // visible frontier: b-010 at 11e3
+	mustReconcile(ctx, t, q) // clock: b-009 at 11e3
 
 	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "a-001", TenantID: "a", Partition: "p", Cost: 1, Weight: 1})
 	assertVStamp(ctx, t, q, "a-001", 12*scale)
 	claimN(ctx, t, q, "p", 11)
-	mustReconcile(ctx, t, q) // nothing visible; last dispatch b-019 at 20e3
+	mustReconcile(ctx, t, q) // a-001 ties b-010 and wins; nothing visible; clock b-019 at 21e3
 
 	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "a-002", TenantID: "a", Partition: "p", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q, "a-002", 21*scale)
+	assertVStamp(ctx, t, q, "a-002", 22*scale)
 }
 
 // TestLWMLanesAreIndependent proves each partition floors against its own
 // frontier: a tenant's position in one lane does not move it in another (a
-// shared timeline would have stamped c's slow job at 13e3).
+// shared timeline would have stamped c's slow job at 12e3). The fast lane's
+// clock is b-fast-009 at 10e3, so c-fast is 11e3; the slow lane was never
+// claimed, so it falls back to min pending (b-slow-000 at 1e3): c-slow 2e3.
 func TestLWMLanesAreIndependent(t *testing.T) {
 	t.Parallel()
 
@@ -324,7 +330,7 @@ func TestLWMLanesAreIndependent(t *testing.T) {
 	claimComplete(ctx, t, q, "fast", jobIDs("b-fast", 0, 10)...)
 
 	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "c-fast", TenantID: "c", Partition: "fast", Cost: 1, Weight: 1})
-	assertVStamp(ctx, t, q, "c-fast", 12*scale)
+	assertVStamp(ctx, t, q, "c-fast", 11*scale)
 	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "c-slow", TenantID: "c", Partition: "slow", Cost: 1, Weight: 1})
 	assertVStamp(ctx, t, q, "c-slow", 2*scale)
 }

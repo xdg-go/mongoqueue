@@ -773,21 +773,21 @@ orphaned; nothing is released, so no migration.
   applies -- report, do not add indexes beyond the three
 
 ### 6.6.2 Test fallout and codex findings
-- [ ] Re-derive exact vstamps in every test whose expectations came from
+- [x] Re-derive exact vstamps in every test whose expectations came from
   min-visible: `TestLWM*` and `TestReconcile*` in `reconcile_test.go`,
   `TestFairness*` in `fairness_test.go` where a claim precedes a cold
   seed, `TestColdStartSeed`. Rename the two `AllLeased` tests to say what
   they now prove. Keep each test's stated rule in its comment; change the
   rule text only where the clock changes it. Re-run the verification
   checklist after this step alone, before 6.6.3
-- [ ] Codex #1: `Reconcile` checks `ctx.Err()` at the top of each refresh
+- [x] Codex #1: `Reconcile` checks `ctx.Err()` at the top of each refresh
   iteration, records it, breaks, and still walks
-- [ ] **Test** (codex #1): hook cancels ctx but returns success; assert no
+- [x] **Test** (codex #1): hook cancels ctx but returns success; assert no
   further hook call and the walk ran
-- [ ] **Test** (codex #2): two partitions fail with distinct sentinel
+- [x] **Test** (codex #2): two partitions fail with distinct sentinel
   errors, a third succeeds; `errors.Is` matches both sentinels and the
   third partition's LWM was stored
-- [ ] **Test** (re-scoped from 6.5): channel-gated late refresh across a
+- [x] **Test** (re-scoped from 6.5): channel-gated late refresh across a
   prune and a recreated timeline -- the stored value is the late one (plain
   overwrite) and the next walk/refresh corrects it. Write it only if it
   stays short; otherwise record it in Future Phases

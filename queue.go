@@ -381,6 +381,12 @@ func (q *Queue) Reconcile(ctx context.Context) error {
 	}
 	var errs []error
 	for _, partition := range q.vtimes.partitions() {
+		// A ctx canceled during a refresh that still succeeded is caught
+		// here, before another refresh is started on a dead ctx.
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
 		if err := q.vtimes.refreshLWM(ctx, partition); err != nil {
 			errs = append(errs, fmt.Errorf("refresh LWM for partition %q: %w", partition, err))
 			if ctx.Err() != nil {

@@ -257,7 +257,8 @@ func TestNodeID(t *testing.T) {
 // TestColdStartSeed verifies the vtime cache's cold-start seed: the first
 // reserve for a (tenant, partition) timeline with pending records starts from
 // the max pending vstamp in that partition (resolved records and other
-// partitions excluded), and a tenant with no records starts at the floor of 0.
+// partitions excluded), and a tenant with no records starts at the
+// partition's frontier.
 func TestColdStartSeed(t *testing.T) {
 	t.Parallel()
 
@@ -274,11 +275,12 @@ func TestColdStartSeed(t *testing.T) {
 	// higher vstamp, which must NOT influence the seed: resolved slots are
 	// already consumed and may be TTL-collected at any time. A pending record
 	// for "warm" in another partition, also higher, must not influence it
-	// either: each partition is its own timeline. Every record is visible an
-	// hour from now, so the cold seed's frontier refresh finds nothing (LWM
-	// 0) and the seed alone sets the first vstamp.
+	// either: each partition is its own timeline. Nothing was ever claimed,
+	// so the frontier is the fallback, the min pending vstamp at any
+	// visibility (j1, delayed an hour), which is below max pending.
+	const minPending = 5 * scale
 	later := time.Now().Add(time.Hour)
-	insertJob(ctx, t, q, Job{ID: "j1", TenantID: "warm", Partition: defaultPartition, Liveness: LivenessPending, VStamp: 5 * scale, VisibleAt: later})
+	insertJob(ctx, t, q, Job{ID: "j1", TenantID: "warm", Partition: defaultPartition, Liveness: LivenessPending, VStamp: minPending, VisibleAt: later})
 	insertJob(ctx, t, q, Job{ID: "j2", TenantID: "warm", Partition: defaultPartition, Liveness: LivenessPending, VStamp: maxPending, VisibleAt: later})
 	insertJob(ctx, t, q, Job{ID: "j3", TenantID: "warm", Partition: defaultPartition, Liveness: LivenessResolved, VStamp: 99 * scale, VisibleAt: later})
 	insertJob(ctx, t, q, Job{ID: "j4", TenantID: "warm", Partition: "other", Liveness: LivenessPending, VStamp: 50 * scale, VisibleAt: later})
@@ -292,14 +294,14 @@ func TestColdStartSeed(t *testing.T) {
 	}
 	r.Commit()
 
-	// A tenant with no records at all seeds at the floor of 0, so its first
-	// candidate is exactly one stride.
+	// A tenant with no records at all seeds at the frontier (j1's delayed
+	// stamp), so its first candidate is one stride past it.
 	r2, err := q.vtimes.reserve(ctx, "fresh", defaultPartition, cost, weight)
 	if err != nil {
 		t.Fatalf("reserve for unseen tenant: %v", err)
 	}
-	if want := stride(cost, weight); r2.vstamp != want {
-		t.Errorf("unseen tenant first vstamp = %d, want %d (floor 0 + stride)", r2.vstamp, want)
+	if want := minPending + stride(cost, weight); r2.vstamp != want {
+		t.Errorf("unseen tenant first vstamp = %d, want %d (frontier %d + stride)", r2.vstamp, want, minPending)
 	}
 	r2.Abort()
 }

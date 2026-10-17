@@ -6,6 +6,7 @@ import (
 	"maps"
 	"math"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -921,5 +922,156 @@ func TestReconcileCanceledMidRefreshStopsRefreshingStillWalks(t *testing.T) {
 		if !tl.stale.Load() {
 			t.Errorf("timeline %v not marked stale", key)
 		}
+	}
+}
+
+// TestReconcileCanceledDuringSuccessfulRefreshStopsRefreshing verifies that a
+// ctx canceled during a refresh that nonetheless succeeds starts no further
+// refresh, is reported, and still lets the walk run. The hook cancels on its
+// first call, so the assertion holds whatever the partition order.
+func TestReconcileCanceledDuringSuccessfulRefreshStopsRefreshing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	armed := false
+	hookCalls := 0
+	c := newVtimeCache()
+	c.lwmHook = func(context.Context, string) (int64, bool, error) {
+		if armed {
+			hookCalls++
+			cancel()
+		}
+		return 0, true, nil
+	}
+	q := &Queue{vtimes: c}
+
+	for _, p := range []string{"p1", "p2", "p3"} {
+		r, err := c.reserve(ctx, "tenant-a", p, 1, 1)
+		if err != nil {
+			t.Fatalf("reserve(%q): %v", p, err)
+		}
+		r.Commit()
+	}
+
+	armed = true
+	if err := q.Reconcile(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("reconcile err = %v, want context.Canceled", err)
+	}
+	if hookCalls != 1 {
+		t.Errorf("refreshes = %d, want 1 (none after cancel)", hookCalls)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for key, tl := range c.tenants {
+		if !tl.stale.Load() {
+			t.Errorf("timeline %v not marked stale (walk did not run)", key)
+		}
+	}
+}
+
+// TestReconcileJoinsEveryRefreshError verifies that each failing partition's
+// error reaches the caller (not just the first or last) and that refresh
+// continues past failures to store a succeeding partition's frontier.
+func TestReconcileJoinsEveryRefreshError(t *testing.T) {
+	ctx := context.Background()
+	errP1 := errors.New("p1 frontier failure")
+	errP2 := errors.New("p2 frontier failure")
+	failing := false
+	c := newVtimeCache()
+	c.lwmHook = func(_ context.Context, partition string) (int64, bool, error) {
+		switch {
+		case failing && partition == "p1":
+			return 0, false, errP1
+		case failing && partition == "p2":
+			return 0, false, errP2
+		case failing:
+			return 10 * scale, true, nil
+		}
+		return 0, true, nil
+	}
+	q := &Queue{vtimes: c}
+
+	for _, p := range []string{"p1", "p2", "p3"} {
+		r, err := c.reserve(ctx, "tenant-a", p, 1, 1)
+		if err != nil {
+			t.Fatalf("reserve(%q): %v", p, err)
+		}
+		r.Commit()
+	}
+
+	failing = true
+	err := q.Reconcile(ctx)
+	if !errors.Is(err, errP1) || !errors.Is(err, errP2) {
+		t.Fatalf("reconcile err = %v, want both p1 and p2 failures", err)
+	}
+	if got := c.lwmFor("p3"); got != 10*scale {
+		t.Errorf("p3 LWM = %d, want %d (refreshed despite other failures)", got, 10*scale)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for key, tl := range c.tenants {
+		if !tl.stale.Load() {
+			t.Errorf("timeline %v not marked stale (walk skipped after refresh failures)", key)
+		}
+	}
+}
+
+// TestRefreshLWMLateAcrossPruneIsCorrectedByNextRefresh verifies the accepted
+// late-refresh race: a refresh gated until after its partition is pruned and
+// a timeline recreated overwrites the newer frontier with its older value
+// (plain overwrite, no max), and the next refresh corrects it.
+func TestRefreshLWMLateAcrossPruneIsCorrectedByNextRefresh(t *testing.T) {
+	ctx := context.Background()
+	entered, gate := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	c := newVtimeCache()
+	c.lwmHook = func(context.Context, string) (int64, bool, error) {
+		switch calls.Add(1) {
+		case 1:
+			return 5 * scale, true, nil
+		case 2: // the late refresh
+			close(entered)
+			<-gate
+			return 5 * scale, true, nil
+		}
+		return 20 * scale, true, nil
+	}
+	q := &Queue{vtimes: c}
+	reserveCommit := func() {
+		t.Helper()
+		r, err := c.reserve(ctx, "tenant-a", "p1", 1, 1)
+		if err != nil {
+			t.Fatalf("reserve: %v", err)
+		}
+		r.Commit()
+	}
+
+	reserveCommit()
+	done := make(chan error, 1)
+	go func() { done <- c.refreshLWM(ctx, "p1") }()
+	unblock := sync.OnceFunc(func() { close(gate) })
+	t.Cleanup(unblock) // release the goroutine if a check below fails
+	<-entered
+	c.invalidateAndEvict() // clears touched
+	c.invalidateAndEvict() // evicts the timeline and prunes p1's LWM
+	if got := c.lwmFor("p1"); got != 0 {
+		t.Fatalf("LWM after prune = %d, want 0", got)
+	}
+	reserveCommit() // cold seed stores the newer frontier
+	if got := c.lwmFor("p1"); got != 20*scale {
+		t.Fatalf("LWM after recreate = %d, want %d", got, 20*scale)
+	}
+
+	unblock()
+	if err := <-done; err != nil {
+		t.Fatalf("late refresh: %v", err)
+	}
+	if got := c.lwmFor("p1"); got != 5*scale {
+		t.Fatalf("LWM after late refresh = %d, want %d (plain overwrite)", got, 5*scale)
+	}
+	if err := q.Reconcile(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got := c.lwmFor("p1"); got != 20*scale {
+		t.Errorf("LWM after reconcile = %d, want %d (corrected)", got, 20*scale)
 	}
 }
