@@ -81,9 +81,7 @@ func (q *Queue) Claim(ctx context.Context, partition string, lease time.Duration
 }
 
 // claimFilter selects partition's visible set: pending jobs whose visible_at
-// has passed in server time ($$NOW). Claim and the frontier query
-// (computeLWM) share it and claimSort so the frontier is always the job the
-// next claim would take.
+// has passed in server time ($$NOW).
 func claimFilter(partition string) bson.D {
 	return bson.D{
 		{Key: "partition", Value: partition},
@@ -93,7 +91,6 @@ func claimFilter(partition string) bson.D {
 }
 
 // claimSort orders the visible set for dispatch: lowest (vstamp, _id) first.
-// Shared with computeLWM; see claimFilter.
 func claimSort() bson.D {
 	return bson.D{{Key: "vstamp", Value: 1}, {Key: "_id", Value: 1}}
 }

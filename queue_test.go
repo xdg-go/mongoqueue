@@ -2,6 +2,7 @@ package mongoqueue
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -25,9 +26,10 @@ func opCtx(t *testing.T) context.Context {
 // contents. ExpireAfterSeconds is a pointer because it is absent on non-TTL
 // indexes.
 type indexInfo struct {
-	Name               string   `bson:"name"`
-	Key                bson.Raw `bson:"key"`
-	ExpireAfterSeconds *int32   `bson:"expireAfterSeconds"`
+	Name                    string   `bson:"name"`
+	Key                     bson.Raw `bson:"key"`
+	ExpireAfterSeconds      *int32   `bson:"expireAfterSeconds"`
+	PartialFilterExpression bson.Raw `bson:"partialFilterExpression"`
 }
 
 // listIndexes returns every index specification on coll.
@@ -85,10 +87,11 @@ func TestNewCreatesNoIndexes(t *testing.T) {
 	}
 }
 
-// TestEnsureIndexesCreatesClaimAndSeedIndexes asserts EnsureIndexes creates
-// exactly the claim and seed indexes with keys in the specified order, and
-// that a second call is a no-op returning no error.
-func TestEnsureIndexesCreatesClaimAndSeedIndexes(t *testing.T) {
+// TestEnsureIndexesCreatesPartialIndexes asserts EnsureIndexes creates
+// exactly the claim, seed, and clock indexes with keys in the specified order
+// and their partial filters, and that a second call is a no-op returning no
+// error.
+func TestEnsureIndexesCreatesPartialIndexes(t *testing.T) {
 	t.Parallel()
 
 	db := mongotest.Connect(t)
@@ -100,52 +103,71 @@ func TestEnsureIndexesCreatesClaimAndSeedIndexes(t *testing.T) {
 		t.Fatalf("EnsureIndexes: %v", err)
 	}
 
-	// Assert both the field order and the sort direction the spec pins, so a
-	// regression in key order or direction is caught.
-	want := map[string]bson.D{
-		"claim": {
-			{Key: "partition", Value: int32(1)},
-			{Key: "liveness", Value: int32(1)},
-			{Key: "vstamp", Value: int32(1)},
-			{Key: "_id", Value: int32(1)},
-			{Key: "visible_at", Value: int32(1)},
-			{Key: "claim_id", Value: int32(1)},
+	// Assert field order, sort direction, and partial filter, so a regression
+	// in any of them is caught.
+	pending := bson.D{{Key: "liveness", Value: "pending"}}
+	claimed := bson.D{{Key: "claim_id", Value: bson.D{{Key: "$gt", Value: ""}}}}
+	want := map[string]struct{ key, partial bson.D }{
+		claimIndexName: {
+			key: bson.D{
+				{Key: "partition", Value: int32(1)},
+				{Key: "vstamp", Value: int32(1)},
+				{Key: "_id", Value: int32(1)},
+				{Key: "visible_at", Value: int32(1)},
+			},
+			partial: pending,
 		},
-		"seed": {
-			{Key: "tenant", Value: int32(1)},
-			{Key: "partition", Value: int32(1)},
-			{Key: "liveness", Value: int32(1)},
-			{Key: "vstamp", Value: int32(-1)},
+		seedIndexName: {
+			key: bson.D{
+				{Key: "tenant", Value: int32(1)},
+				{Key: "partition", Value: int32(1)},
+				{Key: "vstamp", Value: int32(-1)},
+			},
+			partial: pending,
+		},
+		clockIndexName: {
+			key: bson.D{
+				{Key: "partition", Value: int32(1)},
+				{Key: "vstamp", Value: int32(-1)},
+			},
+			partial: claimed,
 		},
 	}
-	var got []bson.D
+	got := map[string]indexInfo{}
 	for _, idx := range listIndexes(ctx, t, coll) {
-		if idx.Name == "_id_" {
-			continue
+		if idx.Name != "_id_" {
+			got[idx.Name] = idx
 		}
-		var key bson.D
-		if err := bson.Unmarshal(idx.Key, &key); err != nil {
-			t.Fatalf("decode index key %v: %v", idx.Key, err)
-		}
-		got = append(got, key)
 	}
 	if len(got) != len(want) {
-		t.Fatalf("non-_id_ indexes = %v, want %d", got, len(want))
+		t.Fatalf("non-_id_ indexes = %+v, want %d", got, len(want))
 	}
 	for name, w := range want {
-		found := false
-		for _, g := range got {
-			if keysEqual(g, w) {
-				found = true
-				break
-			}
+		g, ok := got[name]
+		if !ok {
+			t.Errorf("index %q not found among %+v", name, got)
+			continue
 		}
-		if !found {
-			t.Errorf("%s index %v not found among %v", name, w, got)
+		var key, partial bson.D
+		if err := bson.Unmarshal(g.Key, &key); err != nil {
+			t.Fatalf("decode %s key: %v", name, err)
+		}
+		if g.PartialFilterExpression == nil {
+			t.Errorf("%s index has no partialFilterExpression", name)
+			continue
+		}
+		if err := bson.Unmarshal(g.PartialFilterExpression, &partial); err != nil {
+			t.Fatalf("decode %s partial filter: %v", name, err)
+		}
+		if !reflect.DeepEqual(key, w.key) {
+			t.Errorf("%s key = %v, want %v", name, key, w.key)
+		}
+		if !reflect.DeepEqual(partial, w.partial) {
+			t.Errorf("%s partialFilterExpression = %v, want %v", name, partial, w.partial)
 		}
 	}
 
-	// Idempotent: an identical key spec is a server-side no-op.
+	// Idempotent: an identical spec is a server-side no-op.
 	if err := q.EnsureIndexes(ctx); err != nil {
 		t.Fatalf("second EnsureIndexes returned error: %v", err)
 	}
@@ -282,11 +304,12 @@ func TestColdStartSeed(t *testing.T) {
 	r2.Abort()
 }
 
-// TestComputeLWM proves the frontier is the minimum vstamp in the claim's
-// visible set: leased, delayed, and resolved jobs below it are skipped, and
-// other partitions are ignored. With nothing visible it falls back to the
-// maximum leased vstamp, skipping delayed, released, and resolved jobs above
-// it; a partition with only delayed jobs has no frontier.
+// TestComputeLWM proves the frontier is the partition's service clock: the
+// maximum vstamp ever claimed, whether the job is still pending or resolved.
+// A long lease at a low stamp does not lower it; released retries (fence
+// cleared), delayed, never-claimed, and canceled-before-claim jobs above it
+// do not raise it. A never-claimed partition falls back to its minimum
+// pending vstamp, delayed jobs included; other partitions are ignored.
 func TestComputeLWM(t *testing.T) {
 	t.Parallel()
 
@@ -295,42 +318,61 @@ func TestComputeLWM(t *testing.T) {
 	q := New(db.Collection("jobs"))
 
 	past := time.Now().Add(-time.Minute)
-	insertJob(ctx, t, q, Job{ID: "visible-7", Partition: "p1", Liveness: LivenessPending, VStamp: 7 * scale, VisibleAt: past})
-	insertJob(ctx, t, q, Job{ID: "visible-4", Partition: "p1", Liveness: LivenessPending, VStamp: 4 * scale, VisibleAt: past})
-	insertJob(ctx, t, q, Job{
-		ID: "leased", Partition: "p1", Liveness: LivenessPending, VStamp: 1 * scale,
-		ClaimID: "fence", VisibleAt: time.Now().Add(time.Minute),
-	})
-	insertJob(ctx, t, q, Job{ID: "delayed", Partition: "p1", Liveness: LivenessPending, VStamp: 2 * scale, VisibleAt: time.Now().Add(time.Hour)})
-	insertJob(ctx, t, q, Job{
-		ID: "resolved", Partition: "p1", Liveness: LivenessResolved, VStamp: 3 * scale,
-		Resolution: ResolutionCompleted, VisibleAt: past, ResolvedAt: past,
-	})
-	insertJob(ctx, t, q, Job{ID: "other", Partition: "p2", Liveness: LivenessPending, VStamp: 1 * scale, VisibleAt: past})
-
-	// p3: nothing visible. Leased at 3 and 5; above them a delayed job, a
-	// released job (claim_id cleared), and a resolved job that kept its fence.
 	future := time.Now().Add(time.Hour)
-	for _, j := range []Job{
-		{ID: "p3-leased-3", VStamp: 3 * scale, ClaimID: "fence-3", Liveness: LivenessPending},
-		{ID: "p3-leased-5", VStamp: 5 * scale, ClaimID: "fence-5", Liveness: LivenessPending},
-		{ID: "p3-delayed-9", VStamp: 9 * scale, Liveness: LivenessPending},
-		{ID: "p3-released-8", VStamp: 8 * scale, Liveness: LivenessPending, Attempts: 1},
-		{ID: "p3-canceled-7", VStamp: 7 * scale, ClaimID: "fence-7", Liveness: LivenessResolved, Resolution: ResolutionCanceled, ResolvedAt: past},
-	} {
-		j.Partition, j.VisibleAt = "p3", future
-		insertJob(ctx, t, q, j)
+	insert := func(partition string, jobs []Job) {
+		t.Helper()
+		for _, j := range jobs {
+			j.Partition = partition
+			insertJob(ctx, t, q, j)
+		}
 	}
-	insertJob(ctx, t, q, Job{ID: "p4-delayed", Partition: "p4", Liveness: LivenessPending, VStamp: 2 * scale, VisibleAt: future})
+
+	// p1: the clock is a completed job at 6, above a long lease at 2 and an
+	// in-flight lease at 5.
+	insert("p1", []Job{
+		{ID: "p1-lease-2", VStamp: 2 * scale, ClaimID: "fence-2", Liveness: LivenessPending, VisibleAt: future},
+		{ID: "p1-lease-5", VStamp: 5 * scale, ClaimID: "fence-5", Liveness: LivenessPending, VisibleAt: future},
+		{ID: "p1-done-6", VStamp: 6 * scale, ClaimID: "fence-6", Liveness: LivenessResolved, Resolution: ResolutionCompleted, VisibleAt: past, ResolvedAt: past},
+		{ID: "p1-visible-7", VStamp: 7 * scale, Liveness: LivenessPending, VisibleAt: past},
+		{ID: "p1-released-8", VStamp: 8 * scale, Liveness: LivenessPending, Attempts: 1, VisibleAt: future},
+		{ID: "p1-delayed-9", VStamp: 9 * scale, Liveness: LivenessPending, VisibleAt: future},
+		{ID: "p1-canceled-20", VStamp: 20 * scale, Liveness: LivenessResolved, Resolution: ResolutionCanceled, VisibleAt: past, ResolvedAt: past},
+	})
+
+	// p2: the clock is a pending lease at 4, above a canceled-after-claim job
+	// that kept its fence.
+	insert("p2", []Job{
+		{ID: "p2-canceled-3", VStamp: 3 * scale, ClaimID: "fence-3", Liveness: LivenessResolved, Resolution: ResolutionCanceled, VisibleAt: past, ResolvedAt: past},
+		{ID: "p2-lease-4", VStamp: 4 * scale, ClaimID: "fence-4", Liveness: LivenessPending, VisibleAt: future},
+	})
+
+	// p3: never claimed, so the fallback takes the delayed job at 2 below the
+	// visible one; the canceled job at 1 is not pending.
+	insert("p3", []Job{
+		{ID: "p3-canceled-1", VStamp: 1 * scale, Liveness: LivenessResolved, Resolution: ResolutionCanceled, VisibleAt: past, ResolvedAt: past},
+		{ID: "p3-delayed-2", VStamp: 2 * scale, Liveness: LivenessPending, VisibleAt: future},
+		{ID: "p3-visible-5", VStamp: 5 * scale, Liveness: LivenessPending, VisibleAt: past},
+	})
+
+	// p4: only a job canceled before claim; no clock and nothing pending.
+	insert("p4", []Job{
+		{ID: "p4-canceled-3", VStamp: 3 * scale, Liveness: LivenessResolved, Resolution: ResolutionCanceled, VisibleAt: past, ResolvedAt: past},
+	})
+
+	// other: claimed and pending jobs that every partition above must ignore.
+	insert("other", []Job{
+		{ID: "other-done-100", VStamp: 100 * scale, ClaimID: "fence-100", Liveness: LivenessResolved, Resolution: ResolutionCompleted, VisibleAt: past, ResolvedAt: past},
+		{ID: "other-pending-0", VStamp: 0, Liveness: LivenessPending, VisibleAt: past},
+	})
 
 	for _, tc := range []struct {
 		partition string
 		wantLWM   int64
 		wantOK    bool
 	}{
-		{"p1", 4 * scale, true},
-		{"p2", 1 * scale, true},
-		{"p3", 5 * scale, true},
+		{"p1", 6 * scale, true},
+		{"p2", 4 * scale, true},
+		{"p3", 2 * scale, true},
 		{"p4", 0, false},
 		{"empty", 0, false},
 	} {
@@ -342,16 +384,4 @@ func TestComputeLWM(t *testing.T) {
 			t.Errorf("computeLWM(%q) = (%d, %v), want (%d, %v)", tc.partition, lwm, ok, tc.wantLWM, tc.wantOK)
 		}
 	}
-}
-
-func keysEqual(a, b bson.D) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].Key != b[i].Key || a[i].Value != b[i].Value {
-			return false
-		}
-	}
-	return true
 }

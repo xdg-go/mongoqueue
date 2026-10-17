@@ -447,3 +447,65 @@ func TestReconcileConcurrent(t *testing.T) {
 		}
 	}
 }
+
+// TestLWMDelayedOnlyPartitionInterleaves proves the frontier is the service
+// clock (max ever-claimed vstamp), not the min visible job: with only a's
+// delayed jobs pending, a cold seed floors b at the clock (10e3) instead of 0,
+// so when the delayed batch wakes, a and b alternate rather than b jumping
+// ahead of all of it.
+func TestLWMDelayedOnlyPartitionInterleaves(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	coll := db.Collection("jobs")
+	const part = "p"
+
+	q1 := New(coll)
+	enqueueTenant(ctx, t, q1, 10, EnqueueOpts{TenantID: "a", Partition: part, Cost: 1, Weight: 1})
+	claimComplete(ctx, t, q1, part, jobIDs("a", 0, 10)...)
+	for _, id := range jobIDs("a", 10, 15) {
+		enqueueJob(ctx, t, q1, EnqueueOpts{JobID: id, TenantID: "a", Partition: part, Cost: 1, Weight: 1, Delay: time.Hour})
+	}
+	assertVStamp(ctx, t, q1, "a-010", 11*scale)
+
+	q2 := New(coll)
+	enqueueTenant(ctx, t, q2, 5, EnqueueOpts{TenantID: "b", Partition: part, Cost: 1, Weight: 1})
+	assertVStamp(ctx, t, q2, "b-000", 11*scale)
+
+	past := time.Now().Add(-time.Minute)
+	if _, err := coll.UpdateMany(ctx, bson.D{{Key: "tenant", Value: "a"}, {Key: "liveness", Value: LivenessPending}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "visible_at", Value: past}}}}); err != nil {
+		t.Fatalf("wake delayed jobs: %v", err)
+	}
+
+	// Equal stamps tie-break on id, so a leads each pair.
+	var want []string
+	for i := range 5 {
+		want = append(want, fmt.Sprintf("a-%03d", 10+i), fmt.Sprintf("b-%03d", i))
+	}
+	assertOrder(t, drainOrder(ctx, t, q2, part), want)
+}
+
+// TestLWMLongLeaseDoesNotPullFloorBack proves a long-held lease on a low
+// stamp does not lower the frontier: the clock is the max claimed vstamp
+// (10e3), so b's cold seed is not credited back to a-000's 1e3.
+func TestLWMLongLeaseDoesNotPullFloorBack(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	coll := db.Collection("jobs")
+	const part = "p"
+
+	q1 := New(coll)
+	enqueueTenant(ctx, t, q1, 10, EnqueueOpts{TenantID: "a", Partition: part, Cost: 1, Weight: 1})
+	if cj := mustClaim(ctx, t, q1, part); cj.ID != "a-000" {
+		t.Fatalf("claim dispatched %q, want a-000", cj.ID)
+	}
+	claimComplete(ctx, t, q1, part, jobIDs("a", 1, 10)...)
+
+	q2 := New(coll)
+	enqueueJob(ctx, t, q2, EnqueueOpts{JobID: "b-000", TenantID: "b", Partition: part, Cost: 1, Weight: 1})
+	assertVStamp(ctx, t, q2, "b-000", 11*scale)
+}

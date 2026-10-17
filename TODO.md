@@ -742,33 +742,33 @@ keep `liveness: LivenessPending` (claim, seed, fallback) or
 orphaned; nothing is released, so no migration.
 
 ### 6.6.1 Frontier and indexes (`queue.go`, `claim.go`)
-- [ ] `computeLWM`: clock query (`partition`, `claim_id: {$gt: ""}`; sort
+- [x] `computeLWM`: clock query (`partition`, `claim_id: {$gt: ""}`; sort
   `{vstamp: -1}`; projection `{vstamp: 1, _id: 0}` so it is covered), then
   the fallback (`partition`, `liveness: pending`; sort `{vstamp: 1}`;
   covered) only on no result. Delete `leasedFilter`. `claimFilter` and
   `claimSort` stay for `Claim`. Rewrite the godoc to state the rule and
   why job state does not enter it
-- [ ] `EnsureIndexes`: the three partial indexes above; rewrite its godoc
+- [x] `EnsureIndexes`: the three partial indexes above; rewrite its godoc
   (what each index serves, why each is partial, the write-cost note)
-- [ ] Update `lwmHook`/`refreshLWM`/`computeLWM` comments that say "no
+- [x] Update `lwmHook`/`refreshLWM`/`computeLWM` comments that say "no
   visible pending job" or "delayed only"
-- [ ] **Test**: rewrite `TestComputeLWM` -- clock is the max claimed vstamp
+- [x] **Test**: rewrite `TestComputeLWM` -- clock is the max claimed vstamp
   across pending and resolved; a long lease at a low stamp does not lower
   it; released retries (cleared fence), delayed and never-claimed jobs do
   not raise or pin it; cancelled-before-claim jobs at high stamps are
   ignored; never-claimed partition falls back to min pending (delayed jobs
   count); empty partition `(0, false)`; other partitions ignored
-- [ ] **Test**: rewrite `TestEnsureIndexesCreatesClaimAndSeedIndexes` for
+- [x] **Test**: rewrite `TestEnsureIndexesCreatesClaimAndSeedIndexes` for
   the new keys and partial filters
-- [ ] **Test**: delayed-only partition interleaves -- tenant `a` enqueues
+- [x] **Test**: delayed-only partition interleaves -- tenant `a` enqueues
   and claim+completes `a-000`..`a-009` (clock 10×scale), then enqueues 5
   jobs with `Delay`; fresh Queue (cold node), tenant `b` enqueues 5 jobs:
   first stamp is 11×scale, not 1×scale. Make `a`'s delayed jobs visible
   (write `visible_at` into the past) and drain: `a` and `b` alternate
-- [ ] **Test**: long lease does not pull the floor back -- claim `a-000`
+- [x] **Test**: long lease does not pull the floor back -- claim `a-000`
   and hold the lease (do not complete); claim+complete `a-001`..`a-009`;
   cold seed for `b` stamps 11×scale (clock 10×scale), not 2×scale
-- [ ] **Test**: explain check as an integration test or recorded in the
+- [x] **Test**: explain check as an integration test or recorded in the
   mongodb doc (keys/docs per the table above); the stop rule from 6.3.1
   applies -- report, do not add indexes beyond the three
 
