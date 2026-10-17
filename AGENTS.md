@@ -27,8 +27,8 @@ the caller above the primitive.
   `max(trailing edge, frontier)` on its next enqueue) and evicts idle ones.
 - **Lease, not removal.** A claim attaches a fenced `claim_id` and pushes
   `visible_at` forward; the job stays pending. Expired leases re-enter the
-  visible set, so reclaim is lazy (no sweeper). Terminal writes guard on the
-  fence -- exactly one resolution wins.
+  visible set, so reclaim is lazy (no sweeper). Complete guards on the fence
+  and Cancel on pending liveness -- exactly one resolution wins.
 - **Two orthogonal axes.** *Tenancy* (fairness on/off; single-tenant is the
   one-tenant degenerate case, same code path) and *partitioning* (scoped claims;
   unpartitioned is one default partition). Two-stage stamp partitioning is the
@@ -37,11 +37,12 @@ the caller above the primitive.
 
 ## Mongo/Go specifics
 
-- **Envelope/body split.** The library owns the envelope (`JobID`, `TenantID`,
-  `Cost`, `Partition`, `VStamp`, `Liveness`, `Resolution`, `ClaimID`,
-  `VisibleAt`, `Attempts`, `StampedBy`, `ResolvedAt`, `Kind`); the body is the
-  caller's domain data, stored as a native BSON subdocument (`bson.Raw`) --
-  opaque to queue code, queryable in the database.
+- **Envelope/body split.** The library owns the envelope (`ID` from the
+  caller's `JobID`, `TenantID`, `Cost`, `Partition`, `VStamp`, `Liveness`,
+  `Resolution`, `ClaimID`, `VisibleAt`, `Attempts`, `StampedBy`,
+  `ResolvedAt`); the payload is `Kind` (the decode discriminator) plus the
+  body, the caller's domain data, stored as a native BSON subdocument
+  (`bson.Raw`) -- opaque to queue code, queryable in the database.
 - **Virtual time is fixed-point.** VStamps/vtimes are `int64` in 1e-3 units;
   stride = `max(1, cost*SCALE/weight)`, weight an `int64` per-enqueue field
   (zero means 1). Stamp arithmetic is checked: overflow fails the enqueue.

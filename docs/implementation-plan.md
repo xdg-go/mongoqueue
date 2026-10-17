@@ -96,6 +96,12 @@ caller-invoked index creation. No queue semantics yet.
 - `EnsureTTLIndex(ctx, retention)` -- TTL on `resolved_at`
 - **Test**: index methods create expected indexes; nothing created on `New`
 
+As built: `EnsureIndexes` creates three named partial indexes (claim
+`{partition, vstamp, _id, visible_at}` and seed on pending jobs, clock on
+fenced jobs; Phase 6.6), and the TTL index is named `mongoqueue_ttl` and
+partial on resolved jobs (Phase 7.1). See the mongodb doc's "Indexes,
+contention, and GC".
+
 ---
 
 ## Phase 2: Job Record and Virtual-Time Arithmetic
@@ -135,6 +141,11 @@ generic API boundary. After this phase, jobs land in Mongo correctly stamped.
 - **Test**: failed/duplicate insert advances nothing; concurrent enqueues
   for one tenant produce strictly increasing vstamps
 
+As built: the cache is keyed per (tenant, partition) (Phase 6.1), and a seed
+is `max(trailing edge, frontier)`, where the frontier is the partition's
+service clock (max fenced vstamp, falling back to min pending), not a
+min-visible LWM (Phases 6.3 and 6.6).
+
 ### 3.2 Enqueue core
 - `EnqueueOpts` validation; insert keyed on caller `JobID`; duplicate key
   maps to `ErrDuplicateJob`; sets `visible_at`, `stamped_by`, initial
@@ -154,6 +165,10 @@ generic API boundary. After this phase, jobs land in Mongo correctly stamped.
   means immediately visible, negative rejected (`ErrInvalidDelay`)
 - Seed index in `EnsureIndexes`: `{tenant, liveness, vstamp desc}` -- serves
   the Phase 3.1 cold-start seed query, which the claim index cannot
+
+As built: the seed index is `{tenant, partition, vstamp desc}`, partial on
+pending jobs, alongside the claim and clock indexes (Phase 6.6; see the
+Phase 1.3 note).
 
 ---
 
@@ -214,12 +229,15 @@ and scheduling). Bounds vtime-cache drift and handles restart/idle correctly.
 
 As built, `TODO.md` reshaped this phase into 6.1 per-(tenant, partition)
 timelines (not in the original plan), 6.2 reconcile, 6.3 LWM, and 6.4
-public surface. Reconcile is lazy invalidation (mark used entries stale so
-each re-seeds on its next enqueue; evict unused ones) instead of an eager
-aggregation that rewrites the cache. "Cache rebuild on startup" is the lazy
-seed: a timeline seeds on its first enqueue, and that cold seed also refreshes
-its partition's frontier. The surface is caller-driven `Reconcile(ctx)`. The
-subsections below are the original plan.
+public surface, then added 6.5 review follow-ups (including fixed-point
+`SCALE` 1e6 -> 1e3 and checked stamp arithmetic, `ErrVTimeOverflow`) and 6.6
+(service-clock frontier and the three partial indexes). Reconcile is lazy
+invalidation (mark used entries stale so each re-seeds on its next enqueue;
+evict unused ones) instead of an eager aggregation that rewrites the cache.
+"Cache rebuild on startup" is the lazy seed: a timeline seeds on its first
+enqueue, and that cold seed also refreshes its partition's frontier. The
+surface is caller-driven `Reconcile(ctx)`. The subsections below are the
+original plan.
 
 ### 6.1 Reconciliation
 - Per-tenant max-pending-vstamp aggregation; decide and document the
@@ -322,19 +340,24 @@ some gaps will be code bugs.
 
 ### Throughput
 - Bounded-random-skip claim among top-K visible (only if Phase 5 benchmark
-  hits the contention ceiling)
-- Batch enqueue (`InsertMany` + single cache advance)
+  hits the contention ceiling; rationale in the mongodb doc's "Contention
+  stance")
+- Batch enqueue (`InsertMany` + single cache advance); leave API room
 
 ### Multi-writer
-- Two-stage stamp partitioning (fallback when single-writer-per-tenant cannot
-  be guaranteed at enqueue)
-- Multi-writer detection consumer: per-tenant distinct `stamped_by` count
-  during reconciliation, surfaced as a warning metric
+- Two-stage stamp partitioning (fallback when a single writer per (tenant,
+  partition) cannot be guaranteed at enqueue)
+- Multi-writer detection consumer: per-(tenant, partition) distinct
+  `stamped_by` count during reconciliation, surfaced as a warning metric
+  (rationale in the fair doc's "Multi-writer failure analysis")
 
 ### Caller conveniences
-- `Kind` → handler `Mux` dispatch helper (open question #1; a layer above the
+- `Kind` → handler `Mux` dispatch helper, asynq-style (former mongodb doc
+  open question #1, closed 2026-10-17; an optional layer above the
   primitive, not part of it)
 - `ClaimOpts` with `claimed_by` observability label
+- `CancelOpts.Resolution` override -- only if a cancel-reason need appears
+  (see the mongodb doc's "Resolution: Complete vs Cancel")
 
 ### Cache and reconcile (from Phase 6)
 - Internal reconcile goroutine or `RunReconciler` helper -- only if callers

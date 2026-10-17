@@ -218,20 +218,20 @@ it. Record every statement in the `REVIEW.md` worksheet.
 
 ## 7.4 Reconciliation: Plan, AGENTS.md, Open Questions
 
-- [ ] `docs/implementation-plan.md` Phases 1-5: add short as-built notes
+- [x] `docs/implementation-plan.md` Phases 1-5: add short as-built notes
   where specs were superseded (1.3 and 3.4 index keys → the three partial
   indexes; 3.1 per-tenant cache → per-(tenant, partition); 3.1 "LWM
   floor" wording). Do not rewrite the original subsections
-- [ ] `docs/implementation-plan.md` Phase 6 preamble: confirm it names
+- [x] `docs/implementation-plan.md` Phase 6 preamble: confirm it names
   6.5 and 6.6 (SCALE, checked arithmetic, service clock, partial indexes)
-- [ ] AGENTS.md "The model in brief" and "Mongo/Go specifics": check each
+- [x] AGENTS.md "The model in brief" and "Mongo/Go specifics": check each
   bullet against the code
-- [ ] mongodb doc Open Questions: close #1 (`Mux`) with a pointer to the
+- [x] mongodb doc Open Questions: close #1 (`Mux`) with a pointer to the
   deferred list
-- [ ] Deferred lists: the plan's "Future Phases", the mongodb doc's
+- [x] Deferred lists: the plan's "Future Phases", the mongodb doc's
   "Deferred / future work", and the fair doc's deferrals. Each item
   appears in exactly one place; the others point to it
-- [ ] Doc audit grep across `docs/`, `*.go`, AGENTS.md: "Phase [0-9]",
+- [x] Doc audit grep across `docs/`, `*.go`, AGENTS.md: "Phase [0-9]",
   "deferred to a later phase", "TODO", "not yet" -- remove references
   that no longer hold
 

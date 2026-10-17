@@ -442,8 +442,8 @@ design:
   `ResolutionCanceled` unconditionally. This makes a stored `"canceled"` a
   reliable marker of the cancel path (by convention, callers never pass
   `ResolutionCanceled` to `Complete`). If a cancel-reason need appears, the
-  escape hatch is a future `CancelOpts.Resolution` override -- the open
-  vocabulary means adding it breaks nothing.
+  escape hatch is a future `CancelOpts.Resolution` override (implementation
+  plan "Future Phases") -- the open vocabulary means adding it breaks nothing.
 
 The terminal write (complete or cancel) sets `resolved_at`, the durable key
 GC ages on.
@@ -706,19 +706,21 @@ a rebuild.
 
 ## Deferred / future work
 
-- **Bounded-random-skip claim** if a measured contention ceiling is hit (see
-  above).
-- **Batch enqueue.** The per-timeline vtime cache makes batching natural
-  (one cache advance, one `InsertMany`); leave API room, not in v1.
-- **Multi-writer detection.** `stamped_by` is recorded now (cheap to add
-  early, expensive to retrofit). The consumer -- a per-(tenant, partition)
-  distinct-writer count during reconciliation surfacing a warning metric --
-  is future work.
+Deferred work items live in one place: the implementation plan's "Future
+Phases". Design reasoning stays here and in the fair doc:
+
+- **Bounded-random-skip claim**: see "Contention stance" above.
+- **Batch enqueue**: the per-timeline vtime cache makes batching natural (one
+  cache advance, one `InsertMany`), so the API leaves room for it.
+- **Multi-writer detection**: `stamped_by` is recorded now because it is cheap
+  to add early and expensive to retrofit; the detection consumer is designed
+  in the fair doc's "Multi-writer failure analysis".
 
 ## Open Questions
 
-1. **Dispatch helper.** Whether to ship a caller-side `Kind` → handler `Mux`
-   (asynq-style) as an optional layer above the primitive. Undecided.
+1. **Dispatch helper.** Closed (2026-10-17): a `Kind` → handler `Mux` sits
+   above the primitive; deferred to the implementation plan's "Future
+   Phases".
 2. **Reconciliation/LWM index.** Closed: the clock index; see "Indexes,
    contention, and GC".
 3. **Reconciliation and cache surface.** Closed: caller-driven `Reconcile`;
