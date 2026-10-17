@@ -126,8 +126,8 @@ The queue exposes two independent capabilities. They compose, and a deployment
 selects each separately.
 
 **Tenancy -- whether fairness is on.** A *multi-tenant* queue carries a tenant id
-and a cost on every job, stamps vstamps on per-tenant timelines (one per
-partition, below), and dispatches
+and a cost on every job, stamps vstamps on one timeline per tenant and
+partition (below), and dispatches
 by minimum vstamp to divide capacity by weight. A *single-tenant* queue is the
 degenerate case of exactly one tenant: vtime advances uniformly, the vstamp
 reduces to an enqueue sequence, and dispatch is FIFO over the visible set.
@@ -170,8 +170,8 @@ stamp on the durable record. Dispatch then reduces to claiming the lowest
 visible vstamp. This moves fairness computation and contention off the hot
 dispatch path, where many workers contend, onto the enqueue path, where a
 tenant's own writers contend far less. It also eliminates explicit
-non-empty-queue detection: an index ordered by vstamp over visible jobs skips
-idle tenants for free.
+non-empty-queue detection: an index ordered by vstamp over pending jobs, with
+visibility checked in the index, skips idle tenants for free.
 
 ## Node-local cache model
 
@@ -250,8 +250,8 @@ maximum ever claimed advances only with service.
 The clock overshoots in one accepted way. In a busy partition it sits about
 one stride below the next visible job, which is negligible. When low-stamped
 work re-enters the visible set -- an expired lease, a delayed batch coming
-due, a released retry -- the clock stays where service left it, and a
-newcomer lands behind that work: approximately FIFO, never credit.
+due, a released retry other than the top claimed job (see the dip below) --
+the clock stays where service left it, and a newcomer lands behind that work: approximately FIFO, never credit.
 
 The LWM is soft state like vtime itself, computed on the stamping node and not
 held consistent across the fleet. A node refreshes a partition's LWM when it
@@ -370,9 +370,14 @@ deferred future work; the recorded writer id is the durable hook it will need.
 
 When the enqueue boundary cannot guarantee one writer per tenant, nor uniform
 fan-out, a caller may split ingestion from stamping. This is a workaround the
-caller builds, not behavior the library performs: the library supplies the
-primitives -- a partition-routed durable queue, fenced exclusive ownership, and
-keyed idempotent insert -- and the caller assembles them into a stamping tier.
+caller builds, not behavior the library performs: the library supplies a
+partition-routed durable queue and keyed idempotent insert, and the caller
+assembles them into a stamping tier. Fenced exclusive partition ownership is
+not yet supplied: two-stage support is deferred (see "Future Phases" in the
+implementation plan), and until then ownership fencing is the caller's
+responsibility (for example, an external lock service or its own fenced lease
+record). The ownership primitive described below is the design for that
+deferred work.
 The library does not operate the stampers, schedule them, or decide partition
 ownership.
 
@@ -385,7 +390,7 @@ unchanged. Stage one carries no fairness logic: it is a **single-tenant**
 queue whose only "tenant" is the ingestion stream itself. The caller-supplied
 tenant id rides along as a payload field and as the partition routing key,
 never as a fairness dimension -- stage one neither stamps vstamps nor advances
-any per-tenant vtime. Multiple writers per partition are acceptable. Stage-one
+any timeline's vtime. Multiple writers per partition are acceptable. Stage-one
 requests carry no vstamp; the stamper consumes them in best-effort insertion
 order (any monotone storage key serves), which is irrelevant to fairness --
 fairness begins at stamping. The multi-tenant timeline begins only at stage
@@ -394,17 +399,17 @@ assumed marginal, and fairness goals apply to the stamped work, not the
 stage-one queue.
 
 **Stage two** assigns vstamps. Each partition has one exclusive owning
-**stamper**, which consumes its partition's requests, advances per-tenant
-vtime as the single writer for those tenants, and emits stamped jobs into the
+**stamper**, which consumes its partition's requests, advances those
+tenants' timelines as their single writer, and emits stamped jobs into the
 fair queue. Single-writer correctness now holds by construction, independent
 of how requests arrived.
 
 This relocates the single-writer requirement from a boundary the caller cannot
-control to a partition the caller controls via library primitives. The only
+control to a partition the caller controls. The only
 condition the library imposes is a tenant id -- irreducible for tenant fairness.
 
-Three behaviors the caller's stamping stage must exhibit. The library makes
-each enforceable but does not implement them:
+Three behaviors the caller's stamping stage must exhibit. The library does not
+implement them; once the deferred primitives land, it makes each enforceable:
 
 - **Interleave co-partitioned tenants.** Hash collisions place several tenants
   in one partition. A stamper that drains one tenant's backlog before reaching
@@ -470,8 +475,8 @@ next*.
 
 A single terminal status makes the no-double-resolution property structural:
 exactly one terminal write succeeds per job. Concurrent terminal attempts race
-on a guard that admits the first and rejects the rest, and the loser observes
-the winner's resolution.
+on a guard that admits the first and rejects the rest; the loser is told it
+lost and can read the winner's resolution from the record.
 
 ### Claims, visibility, and three sets
 
@@ -486,8 +491,9 @@ jobs in flight:
   excluding it would let reconciliation re-floor the tenant as if drained,
   losing the tenant's place.
 - **visible** -- pending jobs whose visibility time has passed. This is the
-  claim set: the dispatch index orders by vstamp over visible jobs within the
-  claimed partition and claims the minimum. The low-water mark does not read
+  claim set: the dispatch index orders by vstamp over pending jobs within the
+  claimed partition, with visibility checked in the index, and claims the
+  minimum. The low-water mark does not read
   this set; it is the partition's service clock, read from claim fences (see
   "Low-water mark and the idle floor").
 - **leased** -- pending jobs that hold a claim fence whose visibility time
@@ -623,8 +629,9 @@ meaning (e.g. a unique worker ID), cancelation preserves such information for
 observability purposes.
 
 From the worker's vantage, a steal and a cancel are the same fence failure,
-distinguished only by what it reads back. Both land in resolved with a
-recorded resolution, and the sink's mutual exclusion guarantees a single
+distinguished only by what it reads back. A canceled job lands in resolved
+with a recorded resolution; a stolen job stays pending under the new
+claimant's fence. Either way the sink's mutual exclusion guarantees a single
 winner. Cancellation is not a virtual-time event: the canceled job leaves the
 pending set, and reconciliation may re-anchor the tenant's vtime within one
 reconciliation interval, as described above.

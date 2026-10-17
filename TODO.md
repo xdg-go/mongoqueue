@@ -36,7 +36,8 @@ Before marking a subphase complete and committing it:
 
 1. `go build ./...` and `make vet` pass
 2. `make test` passes (including integration tests against Mongo)
-3. `make lint` clean (config in `.golangci.yml`)
+3. `make lint` clean (config in `.golangci.yml`); remove helpers your
+   change leaves unused, since lint fails on them
 4. New exported identifiers have godoc comments
 5. Every `docs/` file added or removed is reflected in the AGENTS.md
    documentation index in the same commit
@@ -171,10 +172,10 @@ obligations -- find the code that implements it and the test that proves
 it. Record every statement in the `REVIEW.md` worksheet.
 
 ### 7.2.1 `docs/fair-job-queue-design.md`
-- [ ] Walk every section in order. Storage-agnostic statements still map
+- [x] Walk every section in order. Storage-agnostic statements still map
   to code: e.g. "Release clears the claim id" → `lease.go` + test
-- [ ] Fix every **doc lags** finding; record the rest
-- [ ] Watch for stale vocabulary: "per-tenant" vtime, "min visible",
+- [x] Fix every **doc lags** finding; record the rest
+- [x] Watch for stale vocabulary: "per-tenant" vtime, "min visible",
   "leased fallback", "trailing-edge LWM", "monotone hold", SCALE 1e6,
   "claim index" with `liveness`/`claim_id` keys
 
