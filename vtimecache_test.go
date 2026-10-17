@@ -1075,3 +1075,41 @@ func TestRefreshLWMLateAcrossPruneIsCorrectedByNextRefresh(t *testing.T) {
 		t.Errorf("LWM after reconcile = %d, want %d (corrected)", got, 20*scale)
 	}
 }
+
+// TestReconcileFailedRefreshReseedsAtPriorFrontier proves that after a
+// partition's frontier refresh fails, the marked timeline's next re-seed
+// uses the previously stored frontier (10e3), not zero: the failure stores
+// nothing and leaves the prior value in place.
+func TestReconcileFailedRefreshReseedsAtPriorFrontier(t *testing.T) {
+	ctx := context.Background()
+	errFrontier := errors.New("frontier failure")
+	failing := false
+	c := newVtimeCache()
+	c.lwmHook = func(context.Context, string) (int64, bool, error) {
+		if failing {
+			return 0, false, errFrontier
+		}
+		return 10 * scale, true, nil
+	}
+	q := &Queue{vtimes: c}
+
+	r := mustReserve(t, c, "a", 1, 1)
+	if want := 11 * scale; r.vstamp != int64(want) {
+		t.Fatalf("cold-seed vstamp = %d, want %d", r.vstamp, want)
+	}
+	r.Commit()
+
+	failing = true
+	if err := q.Reconcile(ctx); !errors.Is(err, errFrontier) {
+		t.Fatalf("reconcile with failing refresh: err = %v, want errFrontier", err)
+	}
+
+	// The seed hook is nil (trailing edge 0), so the re-seed is the stored
+	// frontier; a lost or zeroed frontier would yield 1e3, and a non-stale
+	// timeline would continue from its cached 11e3 to 12e3.
+	r = mustReserve(t, c, "a", 1, 1)
+	defer r.Abort()
+	if want := 11 * scale; r.vstamp != int64(want) {
+		t.Errorf("re-seed vstamp = %d, want %d (prior frontier 10e3 + stride)", r.vstamp, want)
+	}
+}

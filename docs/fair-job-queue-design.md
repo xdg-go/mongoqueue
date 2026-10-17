@@ -229,23 +229,23 @@ memory; an evicted tenant is re-seeded the same way on its next enqueue.
 
 The **low-water mark** (LWM) of a partition is its **dispatch frontier**,
 defined as the partition's **service clock**: the maximum vstamp among the
-partition's jobs that have ever been claimed. A claim sets the job's claim
-fence; completion and cancellation keep it; only an early release clears it.
+partition's jobs that hold a claim fence (claimed, including resolved, and
+not released). A claim sets the job's claim fence; completion and cancellation keep it; only an early release clears it.
 It is the system virtual time of start-time fair queueing (the start tag of
 the work most recently put into service), and it is per partition because
 each partition has its own point of service.
 
-Only when nothing in the partition has ever been claimed, or its claimed
-history has been garbage-collected, does the LWM fall back to the minimum
+Only when no job in the partition holds a fence (never claimed, every claim
+released, or the claimed history garbage-collected) does the LWM fall back to the minimum
 vstamp among the partition's pending jobs, visible or not. A partition with
-neither -- no claimed history and no pending job -- has no frontier.
+neither -- no fenced job and no pending job -- has no frontier.
 
 Visibility and lease timing do not enter the clock. A frontier read from the
 visible set vanishes whenever workers keep up (every pending job leased) or
 only delayed work remains, so newcomers fall to a stale value or 0 and jump
 ahead of work already scheduled. A minimum over pending jobs lets one long
 lease, a released retry, or a long delay pin the floor for its lifetime. The
-maximum ever claimed advances only with service.
+maximum fenced vstamp advances only with service.
 
 The clock overshoots in one accepted way. In a busy partition it sits about
 one stride below the next visible job, which is negligible. When low-stamped
@@ -554,7 +554,8 @@ ordinary claim -- the attempt count still increments, and the job keeps its
 original vstamp. Release is not a virtual-time event, for the same reasons
 reclaim is not: the releasing worker does not hold the tenant's timeline, so
 a fresh stamp would be a second writer. Because the frontier is the service
-clock, a released low-stamped retry does not hold the floor back either.
+clock, a released low-stamped retry does not hold the floor back either,
+unless it releases the only fenced job and the fallback takes over.
 
 Release must clear the claim id, unlike cancellation. It is the one transition
 that would otherwise leave a stale fence live: after a steal the new claim
@@ -778,7 +779,8 @@ A model or test suite should establish:
   backlog; reclaim preserves the job's original vstamp; lease expiry,
   stealing, heartbeats, and early release do not alter any stamp or vtime.
   Visibility changes do not move the sampled low-water mark; claims and
-  releases do, since the frontier is the maximum vstamp among claimed jobs.
+  releases do, since the frontier is the maximum vstamp among jobs holding
+  a claim fence (claimed, including resolved, and not released).
 - **Enqueue accounting:** a tenant's cached vtime advances only when the
   job's durable insert succeeds; a failed or duplicate insert advances
   nothing. (Compute the stamp speculatively, commit the cache advance on

@@ -2,7 +2,13 @@ package mongoqueue
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"math"
+	"os"
 	"reflect"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -153,9 +159,22 @@ func TestEnsureIndexesCreatesPartialIndexes(t *testing.T) {
 		}
 	}
 
-	// Idempotent: an identical spec is a server-side no-op.
+	// Idempotent: an identical spec is a server-side no-op, so the full
+	// listing (names, keys, partial filters) is unchanged by a second call.
+	before := listIndexes(ctx, t, coll)
 	if err := q.EnsureIndexes(ctx); err != nil {
 		t.Fatalf("second EnsureIndexes returned error: %v", err)
+	}
+	after := listIndexes(ctx, t, coll)
+	byName := func(list []indexInfo) map[string]indexInfo {
+		m := map[string]indexInfo{}
+		for _, idx := range list {
+			m[idx.Name] = idx
+		}
+		return m
+	}
+	if b, a := byName(before), byName(after); !reflect.DeepEqual(a, b) {
+		t.Errorf("indexes changed after second EnsureIndexes:\nbefore %+v\nafter  %+v", b, a)
 	}
 }
 
@@ -290,6 +309,122 @@ func TestResolvedAtOnlyOnResolvedJobs(t *testing.T) {
 	}
 }
 
+// ttlExpireAfter returns the TTL index's expireAfterSeconds, failing if the
+// index or the field is missing.
+func ttlExpireAfter(ctx context.Context, t *testing.T, coll *mongo.Collection) int32 {
+	t.Helper()
+	for _, idx := range listIndexes(ctx, t, coll) {
+		if idx.Name == ttlIndexName {
+			if idx.ExpireAfterSeconds == nil {
+				t.Fatal("TTL index has no expireAfterSeconds")
+			}
+			return *idx.ExpireAfterSeconds
+		}
+	}
+	t.Fatalf("index %q not found", ttlIndexName)
+	return 0
+}
+
+// TestEnsureTTLIndexRecall proves re-calling EnsureTTLIndex with the same
+// retention is a no-op, and with a different retention returns the server's
+// index-options conflict (code 85, wrapped) and leaves the retention unchanged.
+func TestEnsureTTLIndexRecall(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	coll := db.Collection("jobs")
+	q := New(coll)
+
+	if err := q.EnsureTTLIndex(ctx, 24*time.Hour); err != nil {
+		t.Fatalf("first EnsureTTLIndex: %v", err)
+	}
+	if err := q.EnsureTTLIndex(ctx, 24*time.Hour); err != nil {
+		t.Fatalf("same-retention EnsureTTLIndex: %v", err)
+	}
+	if got := ttlExpireAfter(ctx, t, coll); got != 86400 {
+		t.Fatalf("after same-retention re-call, expireAfterSeconds = %d, want 86400", got)
+	}
+
+	err := q.EnsureTTLIndex(ctx, 48*time.Hour)
+	var cmdErr mongo.CommandError
+	if !errors.As(err, &cmdErr) || cmdErr.Code != 85 {
+		t.Fatalf("different-retention EnsureTTLIndex = %v, want wrapped CommandError code 85 (IndexOptionsConflict)", err)
+	}
+	if !strings.HasPrefix(err.Error(), "mongoqueue: ") {
+		t.Errorf("different-retention EnsureTTLIndex error %q lacks %q prefix", err, "mongoqueue: ")
+	}
+	if got := ttlExpireAfter(ctx, t, coll); got != 86400 {
+		t.Errorf("after conflicting re-call, expireAfterSeconds = %d, want 86400", got)
+	}
+}
+
+// TestEnsureIndexesKeepsOtherIndexes proves EnsureIndexes leaves indexes it
+// does not own in place: the earlier version's unnamed (driver auto-named)
+// claim and seed indexes survive the call alongside the three new ones.
+func TestEnsureIndexesKeepsOtherIndexes(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	coll := db.Collection("jobs")
+	q := New(coll)
+
+	// The earlier EnsureIndexes specs (before commit 5775cb4), created
+	// without names exactly as that version did.
+	oldKeys := []bson.D{
+		{
+			{Key: "partition", Value: int32(1)},
+			{Key: "liveness", Value: int32(1)},
+			{Key: "vstamp", Value: int32(1)},
+			{Key: "_id", Value: int32(1)},
+			{Key: "visible_at", Value: int32(1)},
+			{Key: "claim_id", Value: int32(1)},
+		},
+		{
+			{Key: "tenant", Value: int32(1)},
+			{Key: "partition", Value: int32(1)},
+			{Key: "liveness", Value: int32(1)},
+			{Key: "vstamp", Value: int32(-1)},
+		},
+	}
+	models := make([]mongo.IndexModel, len(oldKeys))
+	for i, k := range oldKeys {
+		models[i] = mongo.IndexModel{Keys: k}
+	}
+	oldNames, err := coll.Indexes().CreateMany(ctx, models)
+	if err != nil {
+		t.Fatalf("create earlier indexes: %v", err)
+	}
+	if err := q.EnsureIndexes(ctx); err != nil {
+		t.Fatalf("EnsureIndexes: %v", err)
+	}
+
+	got := map[string]indexInfo{}
+	for _, idx := range listIndexes(ctx, t, coll) {
+		got[idx.Name] = idx
+	}
+	for i, name := range oldNames {
+		g, ok := got[name]
+		if !ok {
+			t.Errorf("earlier index %q missing after EnsureIndexes; have %+v", name, got)
+			continue
+		}
+		var key bson.D
+		if err := bson.Unmarshal(g.Key, &key); err != nil {
+			t.Fatalf("decode %s key: %v", name, err)
+		}
+		if !reflect.DeepEqual(key, oldKeys[i]) {
+			t.Errorf("earlier index %s key = %v, want %v", name, key, oldKeys[i])
+		}
+	}
+	for _, want := range []string{claimIndexName, seedIndexName, clockIndexName} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("index %q missing after EnsureIndexes; have %+v", want, got)
+		}
+	}
+}
+
 // TestEnsureTTLIndexRejectsOutOfRangeRetention asserts that a retention which
 // would truncate to expireAfterSeconds: 0 (deleting resolved jobs immediately)
 // is rejected before any index is created. This needs no server: the guard runs
@@ -305,6 +440,7 @@ func TestEnsureTTLIndexRejectsOutOfRangeRetention(t *testing.T) {
 		{"zero", 0},
 		{"negative", -time.Hour},
 		{"sub-second", 500 * time.Millisecond},
+		{"above MaxInt32 seconds", (math.MaxInt32 + 1) * time.Second},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -325,6 +461,15 @@ func TestNodeID(t *testing.T) {
 	q1 := New(nil)
 	if q1.nodeID == "" {
 		t.Fatal("default nodeID is empty")
+	}
+
+	host, err := os.Hostname()
+	if err != nil {
+		host = "unknown"
+	}
+	format := regexp.MustCompile("^" + regexp.QuoteMeta(fmt.Sprintf("%s-%d-", host, os.Getpid())) + "[0-9a-f]{8}$")
+	if !format.MatchString(q1.nodeID) {
+		t.Errorf("default nodeID = %q, want hostname-pid-<8 hex> matching %v", q1.nodeID, format)
 	}
 
 	q2 := New(nil)
@@ -390,8 +535,31 @@ func TestColdStartSeed(t *testing.T) {
 	r2.Abort()
 }
 
+// TestSeedCountsLeasedJob proves a leased (fenced, invisible) job still
+// raises its tenant's trailing edge: the seed query reads the max pending
+// vstamp at any visibility, so a's lease at 10e3 wins over its visible job
+// at 3e3.
+func TestSeedCountsLeasedJob(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	q := New(db.Collection("jobs"))
+
+	insertJob(ctx, t, q, Job{ID: "a-visible", TenantID: "a", Partition: defaultPartition, Liveness: LivenessPending, VStamp: 3 * scale, VisibleAt: time.Now().Add(-time.Minute)})
+	insertJob(ctx, t, q, Job{ID: "a-leased", TenantID: "a", Partition: defaultPartition, Liveness: LivenessPending, VStamp: 10 * scale, ClaimID: "fence-10", Attempts: 1, VisibleAt: time.Now().Add(time.Hour)})
+
+	edge, err := q.seedTenantVtime(ctx, "a", defaultPartition)
+	if err != nil {
+		t.Fatalf("seedTenantVtime: %v", err)
+	}
+	if edge != 10*scale {
+		t.Errorf("trailing edge = %d, want %d (the leased job)", edge, 10*scale)
+	}
+}
+
 // TestComputeLWM proves the frontier is the partition's service clock: the
-// maximum vstamp ever claimed, whether the job is still pending or resolved.
+// maximum fenced (claimed, unreleased) vstamp, pending or resolved.
 // A long lease at a low stamp does not lower it; released retries (fence
 // cleared), delayed, never-claimed, and canceled-before-claim jobs above it
 // do not raise it. A never-claimed partition falls back to its minimum

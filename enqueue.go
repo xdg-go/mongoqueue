@@ -97,19 +97,19 @@ func (o EnqueueOpts) normalize() (normalizedEnqueue, error) {
 	}, nil
 }
 
-// enqueue is the non-generic insert path: it stamps the job on its tenant's
-// virtual timeline and inserts the durable record. It stays unexported -- the
+// enqueue is the non-generic insert path: it stamps the job on its (tenant,
+// partition) timeline and inserts the durable record. It stays unexported -- the
 // typed Kind facade (Phase 3.3) is the only public entry point for bodies,
 // because the kind string and the body's Go type must be paired at a single
 // declaration site.
 //
-// The reserve->insert->commit sequence holds the tenant's cache lock for the
+// The reserve->insert->commit sequence holds the timeline's cache lock for the
 // duration of the insert (see vtimecache.go). The deferred abort guarantees
 // the lock is released even if InsertOne panics; the cached vtime advances
 // only on a successful insert, so a failed or duplicate insert advances
 // nothing and the candidate slot is reused. Because the lock is held across
 // the insert, callers should bound ctx with a deadline: a hung insert blocks
-// only that tenant's enqueue path, but blocks it for the duration.
+// only that timeline's enqueue path, but blocks it for the duration.
 //
 // enqueue trusts its caller for two invariants owned by the Kind facade
 // (Phase 3.3): kind is non-empty (NewKind panics on empty), and body is a

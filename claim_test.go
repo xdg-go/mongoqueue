@@ -411,3 +411,22 @@ func TestClaimConcurrentMutualExclusion(t *testing.T) {
 		t.Errorf("successes = %d, ErrNoJob = %d; want %d and %d", len(seen), noJob, numJobs, numClaimers-numJobs)
 	}
 }
+
+// TestClaimNoJobDoesNotWrapErrNoDocuments proves an empty Claim returns the
+// bare ErrNoJob sentinel, not one wrapping the driver's mongo.ErrNoDocuments,
+// so callers cannot come to depend on the driver error.
+func TestClaimNoJobDoesNotWrapErrNoDocuments(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	q := New(db.Collection("jobs"))
+
+	_, err := q.Claim(ctx, "", time.Minute)
+	if !errors.Is(err, ErrNoJob) {
+		t.Fatalf("empty Claim = %v, want ErrNoJob", err)
+	}
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		t.Errorf("empty Claim error %v wraps mongo.ErrNoDocuments", err)
+	}
+}

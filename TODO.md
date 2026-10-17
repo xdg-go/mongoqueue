@@ -125,6 +125,12 @@ before anything is edited.
 When unsure whether a gap is "doc lags" or "code deviates" (e.g. the doc
 describes a deliberate rule and the code is simpler), it is a deviation.
 
+A test citation counts only if the test asserts that exact statement;
+otherwise the verdict is **untested**. Before recording a deviation, check
+the plan's "Future Phases" and the mongodb doc's "Deferred / future work":
+a doc that presents a deferred feature as present is **doc lags (deferred
+feature)**.
+
 `REVIEW.md` layout: a **Deviations** section (numbered; each with doc
 location, code location, what each says, a concrete scenario where they
 differ, and a recommendation) and a **Worksheet** appendix holding the
@@ -192,20 +198,20 @@ it. Record every statement in the `REVIEW.md` worksheet.
 
 ## 7.3 Reconciliation: Reverse Pass, Invariants, Rejected Alternatives
 
-- [ ] Reverse pass: list every exported identifier (`go doc -all .`),
+- [x] Reverse pass: list every exported identifier (`go doc -all .`),
   sentinel error, and `Option`. For each, find where the docs describe
   it; flag behavior or caller obligations stated only in godoc (e.g.
   read concern, collation, write concern, `OmitEmpty`, client-clock
   `visible_at` skew)
-- [ ] Godoc vs docs: where both state a rule, they must agree in
+- [x] Godoc vs docs: where both state a rule, they must agree in
   substance. Disagreement is a deviation unless one is plainly older
-- [ ] "Correctness invariants": for each invariant, name the enforcing
+- [x] "Correctness invariants": for each invariant, name the enforcing
   test(s) in the worksheet, or mark it "caller obligation" or
   "unenforced" (e.g. Bounded degradation, Work conservation)
-- [ ] "Rejected alternatives" and `docs/rejected-designs.md`: flag any
+- [x] "Rejected alternatives" and `docs/rejected-designs.md`: flag any
   alternative the code adopted, and any argument stated against a model
   the code no longer has
-- [ ] **Test**: for each **untested** finding, add the test here if it is
+- [x] **Test**: for each **untested** finding, add the test here if it is
   small; otherwise record it in `REVIEW.md`
 
 ---

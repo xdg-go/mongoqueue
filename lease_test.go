@@ -3,6 +3,7 @@ package mongoqueue
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -250,5 +251,81 @@ func TestHeartbeatGuardsOnPrivateFence(t *testing.T) {
 	}
 	if stored := findJob(ctx, t, q, "j1"); stored.VisibleAt.Before(lo.Add(time.Hour)) {
 		t.Errorf("visible_at = %v, want >= %v", stored.VisibleAt, lo.Add(time.Hour))
+	}
+}
+
+// TestReclaimKeepsVStamp proves an expired lease stolen by another claim
+// keeps its vstamp: the steal re-fences the job but does not re-stamp it.
+func TestReclaimKeepsVStamp(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	q := New(db.Collection("jobs"))
+	old := claimOne(ctx, t, q)
+	stamp := findJob(ctx, t, q, "j1").VStamp
+	if stamp == 0 {
+		t.Fatal("j1 vstamp is 0; fixture cannot distinguish a reset")
+	}
+	expireLease(ctx, t, q, old)
+
+	stolen := mustClaim(ctx, t, q, "")
+	if stolen.ID != "j1" || stolen.ClaimID() == old.ClaimID() {
+		t.Fatalf("steal claimed %q with fence %q, want j1 with a new fence", stolen.ID, stolen.ClaimID())
+	}
+	if stolen.VStamp != stamp {
+		t.Errorf("stolen handle vstamp = %d, want %d", stolen.VStamp, stamp)
+	}
+	if got := findJob(ctx, t, q, "j1").VStamp; got != stamp {
+		t.Errorf("stored vstamp after steal = %d, want %d", got, stamp)
+	}
+}
+
+// TestLeaseLostAfterDelete proves that once a claimed job's record is gone
+// (TTL or manual delete), the holder's Heartbeat, Release, and Complete
+// return ErrLeaseLost.
+func TestLeaseLostAfterDelete(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	q := New(db.Collection("jobs"))
+	cj := claimOne(ctx, t, q)
+	res, err := q.coll.DeleteOne(ctx, bson.D{{Key: "_id", Value: "j1"}})
+	if err != nil || res.DeletedCount != 1 {
+		t.Fatalf("delete j1: deleted %v, err %v", res, err)
+	}
+
+	if err := cj.Heartbeat(ctx, time.Minute); !errors.Is(err, ErrLeaseLost) {
+		t.Errorf("Heartbeat after delete = %v, want ErrLeaseLost", err)
+	}
+	if err := cj.Release(ctx, 0); !errors.Is(err, ErrLeaseLost) {
+		t.Errorf("Release after delete = %v, want ErrLeaseLost", err)
+	}
+	if err := cj.Complete(ctx, ResolutionCompleted); !errors.Is(err, ErrLeaseLost) {
+		t.Errorf("Complete after delete = %v, want ErrLeaseLost", err)
+	}
+}
+
+// TestHeartbeatLeavesHandleSnapshot proves handle methods do not update the
+// ClaimedJob snapshot: after a Heartbeat moves the stored visible_at, the
+// handle still carries its claim-time copy.
+func TestHeartbeatLeavesHandleSnapshot(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	q := New(db.Collection("jobs"))
+	cj := claimOne(ctx, t, q)
+	before := cj.Job
+
+	if err := cj.Heartbeat(ctx, time.Hour); err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	if stored := findJob(ctx, t, q, "j1"); stored.VisibleAt.Equal(before.VisibleAt) {
+		t.Fatalf("stored visible_at %v did not move; fixture cannot distinguish", stored.VisibleAt)
+	}
+	if !reflect.DeepEqual(cj.Job, before) {
+		t.Errorf("handle snapshot changed after Heartbeat:\n got %+v\nwant %+v", cj.Job, before)
 	}
 }

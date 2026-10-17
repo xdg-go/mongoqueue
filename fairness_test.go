@@ -292,3 +292,30 @@ func TestRaceFairnessConcurrentTenants(t *testing.T) {
 	want = append(want, fmt.Sprintf("b-%03d", n-1))
 	assertOrder(t, drainOrder(ctx, t, q, ""), want)
 }
+
+// TestWeightChangeAffectsOnlyLaterStamps proves a weight change mid-backlog
+// re-strides only the jobs enqueued after it: a-000 and a-001 keep their
+// weight-1 stamps (1e3, 2e3) while a-002 at weight 2 and a-003 at weight 4
+// advance by 500 and 250 from there.
+func TestWeightChangeAffectsOnlyLaterStamps(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	q := New(db.Collection("jobs"))
+
+	for _, j := range []struct {
+		id     string
+		weight int64
+	}{{"a-000", 1}, {"a-001", 1}, {"a-002", 2}, {"a-003", 4}} {
+		enqueueJob(ctx, t, q, EnqueueOpts{JobID: j.id, TenantID: "a", Cost: 1, Weight: j.weight})
+	}
+	for id, want := range map[string]int64{
+		"a-000": 1 * scale,
+		"a-001": 2 * scale,
+		"a-002": 2*scale + scale/2,
+		"a-003": 2*scale + scale/2 + scale/4,
+	} {
+		assertVStamp(ctx, t, q, id, want)
+	}
+}

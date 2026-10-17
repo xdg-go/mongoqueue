@@ -423,7 +423,7 @@ func TestReconcileConcurrent(t *testing.T) {
 }
 
 // TestLWMDelayedOnlyPartitionInterleaves proves the frontier is the service
-// clock (max ever-claimed vstamp), not the min visible job: with only a's
+// clock (max fenced vstamp), not the min visible job: with only a's
 // delayed jobs pending, a cold seed floors b at the clock (10e3) instead of 0,
 // so when the delayed batch wakes, a and b alternate rather than b jumping
 // ahead of all of it.
@@ -482,4 +482,83 @@ func TestLWMLongLeaseDoesNotPullFloorBack(t *testing.T) {
 	q2 := New(coll)
 	enqueueJob(ctx, t, q2, EnqueueOpts{JobID: "b-000", TenantID: "b", Partition: part, Cost: 1, Weight: 1})
 	assertVStamp(ctx, t, q2, "b-000", 11*scale)
+}
+
+// assertLWM fails unless partition's computed frontier is want.
+func assertLWM(ctx context.Context, t *testing.T, q *Queue, partition string, want int64) {
+	t.Helper()
+	lwm, ok, err := q.computeLWM(ctx, partition)
+	if err != nil {
+		t.Fatalf("computeLWM(%q): %v", partition, err)
+	}
+	if !ok || lwm != want {
+		t.Fatalf("computeLWM(%q) = (%d, %v), want (%d, true)", partition, lwm, ok, want)
+	}
+}
+
+// TestLWMReleasedOnlyFallsBackToMinPending proves the released-only
+// fallback end to end: a's delayed jobs sit at 1e3..3e3 below its visible
+// job at 4e3; claiming that job sets the clock to 4e3, and releasing it
+// clears the only fence, so the frontier dips to min pending (1e3) and a cold
+// newcomer lands at 2e3, ahead of the released job.
+func TestLWMReleasedOnlyFallsBackToMinPending(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	coll := db.Collection("jobs")
+	const part = "p"
+
+	q1 := New(coll)
+	for _, id := range jobIDs("a", 0, 3) {
+		enqueueJob(ctx, t, q1, EnqueueOpts{JobID: id, TenantID: "a", Partition: part, Cost: 1, Weight: 1, Delay: time.Hour})
+	}
+	enqueueJob(ctx, t, q1, EnqueueOpts{JobID: "a-003", TenantID: "a", Partition: part, Cost: 1, Weight: 1})
+	assertVStamp(ctx, t, q1, "a-000", 1*scale)
+	assertVStamp(ctx, t, q1, "a-003", 4*scale)
+
+	cj := mustClaim(ctx, t, q1, part)
+	if cj.ID != "a-003" {
+		t.Fatalf("claim dispatched %q, want a-003", cj.ID)
+	}
+	assertLWM(ctx, t, q1, part, 4*scale)
+	if err := cj.Release(ctx, 0); err != nil {
+		t.Fatalf("release a-003: %v", err)
+	}
+	assertLWM(ctx, t, q1, part, 1*scale)
+
+	q2 := New(coll)
+	enqueueJob(ctx, t, q2, EnqueueOpts{JobID: "b-000", TenantID: "b", Partition: part, Cost: 1, Weight: 1})
+	assertVStamp(ctx, t, q2, "b-000", 2*scale)
+	assertOrder(t, drainOrder(ctx, t, q2, part), []string{"b-000", "a-003"})
+}
+
+// TestLWMExpiredLowLeaseLeavesClock proves low-stamped work re-entering the
+// visible set leaves the clock in place: a-000 (1e3) and a-001 (2e3) are
+// claimed, a-000's lease expires, and the frontier stays at 2e3, so a cold
+// newcomer lands at 3e3, behind the re-entered a-000.
+func TestLWMExpiredLowLeaseLeavesClock(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	coll := db.Collection("jobs")
+	const part = "p"
+
+	q1 := New(coll)
+	enqueueTenant(ctx, t, q1, 2, EnqueueOpts{TenantID: "a", Partition: part, Cost: 1, Weight: 1})
+	low := mustClaim(ctx, t, q1, part)
+	if low.ID != "a-000" {
+		t.Fatalf("first claim dispatched %q, want a-000", low.ID)
+	}
+	if cj := mustClaim(ctx, t, q1, part); cj.ID != "a-001" {
+		t.Fatalf("second claim dispatched %q, want a-001", cj.ID)
+	}
+	expireLease(ctx, t, q1, low)
+	assertLWM(ctx, t, q1, part, 2*scale)
+
+	q2 := New(coll)
+	enqueueJob(ctx, t, q2, EnqueueOpts{JobID: "b-000", TenantID: "b", Partition: part, Cost: 1, Weight: 1})
+	assertVStamp(ctx, t, q2, "b-000", 3*scale)
+	assertOrder(t, drainOrder(ctx, t, q2, part), []string{"a-000", "b-000"})
 }

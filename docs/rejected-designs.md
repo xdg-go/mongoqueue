@@ -117,5 +117,5 @@ rejected. Runtime credentials often lack `createIndex`; an index build on a
 populated collection is a scheduled operational event, not a deploy side
 effect; and TTL is destructive policy no library should enable silently. The
 library instead exposes caller-invoked methods, split so callers can take one
-without the other: `EnsureIndexes` for the claim index and `EnsureTTLIndex`
-for GC, the latter requiring an explicit retention duration.
+without the other: `EnsureIndexes` for the claim, seed, and clock indexes and
+`EnsureTTLIndex` for GC, the latter requiring an explicit retention duration.

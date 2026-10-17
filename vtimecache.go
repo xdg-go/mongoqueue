@@ -62,8 +62,8 @@ type vtimeCache struct {
 	seedHook func(ctx context.Context, tenant, partition string) (int64, error)
 
 	// lwmHook, when non-nil, returns a partition's dispatch frontier (its
-	// low-water mark, LWM): its service clock, the highest vstamp ever
-	// claimed there, or with nothing ever claimed the lowest pending vstamp.
+	// low-water mark, LWM): its service clock, the highest fenced (claimed,
+	// unreleased) vstamp there, or with no fenced job the lowest pending vstamp.
 	// ok is false when the partition has neither. Queue wires it to
 	// computeLWM. Nil means the LWM is always 0. Every seed takes
 	// max(trailing edge, LWM), so a new, evicted, or returning timeline joins

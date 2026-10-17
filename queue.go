@@ -103,8 +103,8 @@ func New(coll *mongo.Collection, opts ...Option) *Queue {
 //
 // Index dependency: this query is covered by the seed index that
 // EnsureIndexes creates. The claim index leads with partition and cannot
-// serve the per-tenant lookup; without the seed index, seeding a timeline is a filtered
-// collection scan under that timeline's cache lock.
+// serve the per-(tenant, partition) lookup; without the seed index, seeding
+// a timeline is a filtered collection scan under that timeline's cache lock.
 func (q *Queue) seedTenantVtime(ctx context.Context, tenant, partition string) (int64, error) {
 	vstamp, _, err := q.firstVStamp(ctx, seedFilter(tenant, partition), vstampSort(-1))
 	if err != nil {
@@ -125,10 +125,10 @@ func seedFilter(tenant, partition string) bson.D {
 }
 
 // computeLWM returns partition's dispatch frontier (its low-water mark): the
-// partition's service clock, the maximum vstamp among jobs that have ever
-// been claimed (claim_id set, any liveness). Claim sets claim_id; Complete
-// and Cancel keep it; only Release clears it. When nothing was ever claimed
-// (or the claimed history was GC'd), it falls back to the minimum vstamp
+// partition's service clock, the maximum vstamp among jobs holding a claim
+// fence (claim_id set, any liveness). Claim sets claim_id; Complete and
+// Cancel keep it; only Release clears it. When no job holds a fence (never
+// claimed, all released, or GC'd), it falls back to the minimum vstamp
 // among pending jobs, visible or not. ok is false when the partition has
 // neither.
 //
@@ -137,7 +137,7 @@ func seedFilter(tenant, partition string) bson.D {
 // delayed-only partition, so newcomers start at a stale value or 0 and jump
 // ahead of work already scheduled. Taking a minimum over pending jobs lets a
 // long lease, a released retry, or a long delay pin the floor for its
-// lifetime, handing newcomers unbounded credit. The maximum ever claimed
+// lifetime, handing newcomers unbounded credit. The maximum fenced vstamp
 // only advances with service; it dips only when the top claimed job is
 // released or GC'd.
 //
@@ -155,7 +155,7 @@ func (q *Queue) computeLWM(ctx context.Context, partition string) (lwm int64, ok
 	return lwm, ok, nil
 }
 
-// clockFilter selects partition's ever-claimed jobs. Released and
+// clockFilter selects partition's fenced (claimed, unreleased) jobs. Released and
 // never-claimed jobs store an empty claim_id; $gt "" also skips a missing
 // field. The claim_id predicate must stay literal so the query can use the
 // clock index's partial filter.
@@ -242,8 +242,8 @@ func randomHex() string {
 //     {liveness: "pending"}, serves the seed query, which reads a (tenant,
 //     partition) timeline's maximum pending vstamp.
 //   - clock {partition: 1, vstamp: -1}, partial on {claim_id: {$gt: ""}},
-//     serves the frontier's service clock, the maximum vstamp ever claimed in
-//     a partition (see computeLWM).
+//     serves the frontier's service clock, the maximum vstamp among a
+//     partition's fenced (claimed, unreleased) jobs (see computeLWM).
 //
 // Each index is partial so it holds only the jobs its queries can match:
 // resolved jobs leave the claim and seed indexes, and never-claimed or

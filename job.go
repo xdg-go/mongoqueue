@@ -88,7 +88,7 @@ type Job struct {
 	Partition string `bson:"partition"`
 
 	// Cost is the caller-declared cost used to compute the job's stride
-	// on the tenant's virtual timeline (floored to a small positive
+	// on its (tenant, partition) timeline (floored to a small positive
 	// minimum at enqueue).
 	Cost int64 `bson:"cost"`
 
@@ -119,8 +119,8 @@ type Job struct {
 	Attempts int `bson:"attempts"`
 
 	// StampedBy is the id of the node that stamped the job's VStamp --
-	// the hook for detecting unintended multi-writer enqueue for a
-	// tenant.
+	// the hook for detecting unintended multi-writer enqueue on a
+	// (tenant, partition) timeline.
 	StampedBy string `bson:"stamped_by"`
 
 	// ResolvedAt is set by the terminal write and keys TTL garbage

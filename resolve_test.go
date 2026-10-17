@@ -3,6 +3,7 @@ package mongoqueue
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -310,5 +311,46 @@ func TestHandleConcurrentHeartbeatAndComplete(t *testing.T) {
 	}
 	if err := cj.Heartbeat(ctx, time.Minute); !errors.Is(err, ErrLeaseLost) {
 		t.Errorf("Heartbeat after Complete = %v, want ErrLeaseLost", err)
+	}
+}
+
+// TestDriverErrorsWrapped proves Claim, the fenced writes, Cancel, and Get
+// wrap a non-sentinel driver error with %w under the mongoqueue prefix. A
+// canceled context makes the driver fail each call without fault injection.
+func TestDriverErrorsWrapped(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	q := New(db.Collection("jobs"))
+	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "j1", TenantID: "t1"})
+	enqueueJob(ctx, t, q, EnqueueOpts{JobID: "j2", TenantID: "t1"})
+	cj := mustClaim(ctx, t, q, "")
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	calls := map[string]func() error{
+		"Claim": func() error {
+			_, err := q.Claim(canceled, "", time.Minute)
+			return err
+		},
+		"Heartbeat": func() error { return cj.Heartbeat(canceled, time.Minute) },
+		"Release":   func() error { return cj.Release(canceled, 0) },
+		"Complete":  func() error { return cj.Complete(canceled, ResolutionCompleted) },
+		"Cancel":    func() error { return q.Cancel(canceled, "j2") },
+		"Get": func() error {
+			_, err := q.Get(canceled, "j2")
+			return err
+		},
+	}
+	for name, call := range calls {
+		err := call()
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("%s with canceled ctx = %v, want wrapped context.Canceled", name, err)
+			continue
+		}
+		if !strings.HasPrefix(err.Error(), "mongoqueue: ") {
+			t.Errorf("%s error %q lacks the mongoqueue: prefix", name, err)
+		}
 	}
 }

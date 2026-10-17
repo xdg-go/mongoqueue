@@ -235,6 +235,12 @@ operational assumption (NTP-class skew, benign against lease granularity),
 not something server-side stamping could eliminate -- `$$NOW` is not
 guaranteed consistent across a sharded cluster either.
 
+**Node id.** Each job records the stamping node in `stamped_by`. `New` mints
+a default node id of the form `hostname-pid-<random hex>`; the `WithNodeID`
+option (an `Option` applied by `New` in order) overrides it, for tests that
+simulate several writers from one process or deployments that want a stable,
+human-meaningful id.
+
 **Vtime cache and `Reconcile`.** Reconciliation is caller-driven: one
 exported method, `func (q *Queue) Reconcile(ctx context.Context) error`, that
 the caller runs on its own ticker. There is no internal goroutine, no `Close`,
@@ -252,7 +258,9 @@ runs. A cold seed (the first enqueue on a (tenant, partition) this node has
 no entry for) refreshes that partition's frontier itself, so new and
 returning tenants are floored correctly even on a node that never calls
 `Reconcile`. Without `Reconcile`, cache drift for active timelines is never
-corrected and the cache never shrinks.
+corrected and the cache never shrinks. A `Queue` is safe to share across
+goroutines, and `Reconcile` is safe to call concurrently with itself and with
+every other `Queue` method.
 
 `kind` is a payload field, so it rides on the `Kind[T]` binding rather than in
 `EnqueueOpts`. The binding is its only writer and pairs a stable `kind` with
@@ -503,9 +511,9 @@ cache. The claim index cannot serve it (it leads with `partition` and sorts
 `vstamp` ascending over all tenants).
 
 **Clock index.** Serves the dispatch frontier (`computeLWM`), the partition's
-service clock: the maximum vstamp among jobs ever claimed, `claim_id` set,
-any liveness. Claim sets `claim_id`, Complete and Cancel keep it, and only
-Release clears it, so the index holds exactly the claimed history.
+service clock: the maximum vstamp among jobs holding a claim fence, `claim_id`
+set, any liveness. Claim sets `claim_id`, Complete and Cancel keep it, and only
+Release clears it, so the index holds exactly the fenced jobs.
 
 **Why partial.** Each index holds only the jobs its queries can match:
 resolved jobs leave the claim and seed indexes, and never-claimed or released
@@ -538,8 +546,8 @@ with them, so there is no migration.
 the primary-routed handle, each with projection `{vstamp: 1, _id: 0}` so it
 is covered (no document fetch). The clock query, filter `{partition,
 claim_id: {$gt: ""}}` sorted `{vstamp: -1}`, reads the first entry of the
-clock index. Only when it finds nothing (partition never claimed, or its
-claimed history GC'd) does the fallback run: filter `{partition, liveness:
+clock index. Only when it finds nothing (no fenced job: never claimed,
+all released, or GC'd) does the fallback run: filter `{partition, liveness:
 "pending"}` sorted `{vstamp: 1}`, the first entry of the claim index, any
 visibility. All these reads go through the primary-routed collection handle
 (see "Lease contracts" on read concern).
@@ -554,7 +562,7 @@ retries; plus a never-claimed, delayed-only partition.
 |---|---|---:|---:|
 | Claim (min visible) | `mongoqueue_claim` | 27 | 1 |
 | Seed (tenant max pending) | `mongoqueue_seed` | 1 | 0 |
-| Clock (max ever claimed) | `mongoqueue_clock` | 1 | 0 |
+| Clock (max fenced) | `mongoqueue_clock` | 1 | 0 |
 | Clock, never-claimed partition | `mongoqueue_clock` | 0 | 0 |
 | Fallback (min pending) | `mongoqueue_claim` | 1 | 0 |
 
@@ -666,7 +674,9 @@ They are split because a caller may want the first and not the second: the
 claim index is required plumbing, while TTL is destructive policy. Runtime
 credentials often lack `createIndex`, and index builds on a populated
 collection are a scheduled operational event -- hence no auto-creation for
-either.
+either. The index names `mongoqueue_claim`, `mongoqueue_seed`,
+`mongoqueue_clock`, and `mongoqueue_ttl` are reserved on the collection;
+re-calling either method with identical specifications is a server-side no-op.
 
 **GC.** The terminal write sets `resolved_at`. `EnsureTTLIndex` keys the TTL
 index `mongoqueue_ttl` on it, partial on `{liveness: "resolved"}`, so only
