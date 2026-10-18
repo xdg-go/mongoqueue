@@ -42,8 +42,9 @@ func (k Kind[T]) Kind() string {
 }
 
 // Enqueue marshals body to BSON and enqueues it on q under the binding's
-// kind. Callers never build raw BSON; the binding owns the marshal, so the
-// stored body is always the BSON form of a T.
+// kind. The binding owns the marshal, so the stored body is always the BSON
+// form of a T. A Kind[bson.Raw] accepts a caller-built body (bson.Marshal
+// still rejects malformed framing) but opts out of the kind-to-type pairing.
 //
 // Bodies must marshal to a BSON document: bson.Marshal rejects top-level
 // scalars and arrays, and that error is surfaced as-is. See EnqueueOpts for

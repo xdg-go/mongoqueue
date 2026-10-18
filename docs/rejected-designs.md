@@ -97,6 +97,17 @@ storage forms each fail one axis:
 `bson.Raw` is opaque where opacity is wanted (library code) and transparent
 where transparency is wanted (the database).
 
+## Restricting raw body types in `Kind[T]`
+
+A type constraint, or a `NewKind` check, rejecting `bson.Raw` and similar raw
+types as `T` was considered and rejected. Malformed framing is already
+rejected: `bson.Marshal` fails on an invalid `bson.Raw`. The restriction cannot
+be expressed cleanly in Go generics (there is no "not this type" constraint),
+so it would be a runtime check on the reflected type. A raw binding is also a
+legitimate escape hatch, for callers relaying pre-encoded bodies. The cost
+accepted: a raw binding pairs its `kind` with no schema, so `kind`↔shape drift
+is the caller's choice.
+
 ## Weight via resolver callback or tenant registry
 
 A caller-supplied `WeightFunc(tenantID)` resolver (or a `RegisterTenant` API)

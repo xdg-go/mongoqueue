@@ -67,9 +67,11 @@ scheme, so the JSON layer would be pure overhead.
 
 1. A readable body becomes a *de facto* schema once ops query it, so a field
    rename can break dashboards, not just caller code.
-2. The facade controls marshaling (`bson.Marshal(T)`); the API does not accept a
-   caller-built `bson.Raw`, to keep malformed framing and `kind`↔type drift out
-   of the collection.
+2. The facade controls marshaling (`bson.Marshal(T)`), so malformed framing
+   never reaches the collection: `bson.Marshal` rejects an invalid `bson.Raw`.
+   A `Kind[bson.Raw]` (or other raw/untyped `T`) binding accepts a caller-built
+   body and opts out of the `kind`↔type pairing; any `kind`↔shape drift is
+   then the caller's choice.
 3. The dispatch hot path touches only envelope fields, so body readability adds
    zero claim-path cost.
 

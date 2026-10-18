@@ -160,6 +160,10 @@ min-visible LWM (Phases 6.3 and 6.6).
 - **Test**: round-trip through facade; `kind`↔type drift caught on decode;
   heterogeneous kinds coexist in one collection
 
+As built: nothing restricts `T`, so a `Kind[bson.Raw]` binding accepts a
+caller-built body; `bson.Marshal` still rejects malformed framing, and such a
+binding opts out of the `kind`↔type pairing (see `docs/rejected-designs.md`).
+
 ### 3.4 Amendments (post-review)
 - `EnqueueOpts.Delay` -- delayed enqueue: `visible_at = now + Delay`, zero
   means immediately visible, negative rejected (`ErrInvalidDelay`)
