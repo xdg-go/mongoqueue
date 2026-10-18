@@ -31,7 +31,7 @@ const (
 
 // Resolution records how a job ended. The vocabulary is open: the library
 // provides two canonical values (ResolutionCompleted, ResolutionCanceled) and
-// callers are free define their own. Resolution is set by the terminal write
+// callers are free to define their own. Resolution is set by the terminal write
 // (Complete or Cancel) and is absent while pending.
 //
 // There is no ResolutionFailed, because the queue library has no failure/retry
@@ -117,6 +117,10 @@ type Job struct {
 	VisibleAt time.Time `bson:"visible_at"`
 
 	// Attempts counts claims of this job, incremented at each dispatch.
+	// The queue never caps it: a job whose worker keeps failing or dying
+	// is reclaimed indefinitely, so a worker that wants bounded retries
+	// checks Attempts after Claim and resolves the job itself once it
+	// exceeds the caller's limit.
 	Attempts int `bson:"attempts"`
 
 	// StampedBy is the id of the node that stamped the job's VStamp --

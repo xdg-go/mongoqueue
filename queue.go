@@ -243,7 +243,7 @@ func randomHex() string {
 //     partition) timeline's maximum pending vstamp.
 //   - clock {partition: 1, vstamp: -1}, partial on {claim_id: {$gt: ""}},
 //     serves the frontier's service clock, the maximum vstamp among a
-//     partition's fenced (claimed, unreleased) jobs (see computeLWM).
+//     partition's fenced (claimed, unreleased) jobs.
 //
 // Each index is partial so it holds only the jobs its queries can match:
 // resolved jobs leave the claim and seed indexes, and never-claimed or
@@ -315,7 +315,8 @@ const (
 // ttlIndexName is the name EnsureTTLIndex assigns.
 const ttlIndexName = "mongoqueue_ttl"
 
-// EnsureTTLIndex creates the garbage-collection TTL index on resolved_at with
+// EnsureTTLIndex creates the garbage-collection TTL index, named
+// mongoqueue_ttl (reserved on the collection), on resolved_at with
 // expireAfterSeconds derived from retention. The index is partial on
 // liveness: resolved, so it holds resolved jobs only and the TTL can never
 // delete a pending or claimed job, whatever fields that job carries.

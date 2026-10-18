@@ -22,6 +22,12 @@ const defaultPartition = "default"
 //
 // Envelope fields travel in EnqueueOpts, not inside the body -- the library
 // must read them and is contractually blind to the body.
+//
+// Enqueues for one (tenant, partition) timeline must come from a single
+// writer: one node and, within it, one Queue. Each Queue caches its own copy
+// of the timeline's virtual time, so two writers stamp from independent
+// copies and give that tenant more than its share until [Queue.Reconcile]
+// re-seeds them.
 type EnqueueOpts struct {
 	// JobID is the caller-supplied job id: the record's Mongo "_id" and
 	// the idempotency key for enqueue. Required; enqueue rejects an empty
@@ -44,8 +50,10 @@ type EnqueueOpts struct {
 
 	// Weight is the tenant's fair-share weight for this enqueue. Zero
 	// means 1; otherwise it must be >= 1, and a negative value is
-	// rejected with ErrInvalidWeight. Weight consistency across a
-	// tenant's producers is a caller obligation.
+	// rejected with ErrInvalidWeight. Every producer for a tenant must
+	// pass the same Weight: the stride is computed per enqueue, so mixed
+	// weights give the tenant a share that depends on which producer
+	// enqueued each job.
 	Weight int64
 
 	// Delay postpones the job's first visibility: visible_at is set to

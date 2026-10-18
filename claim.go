@@ -42,6 +42,10 @@ func (c *ClaimedJob) ClaimID() string { return c.claimID }
 // claimers never receive the same job while its lease is live; an expired
 // lease makes the job claimable again with no sweeper.
 //
+// Effects are at-least-once: a worker that stalls past its lease, crashes,
+// or loses its Complete to a timeout can leave work done while the job is
+// claimed again, so workers must be idempotent.
+//
 // lease must be positive; lease <= 0 returns ErrInvalidLease before any
 // server round trip. Sub-millisecond leases round up to one millisecond. An
 // empty visible set returns ErrNoJob. Other errors wrap the driver error; a

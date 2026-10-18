@@ -252,11 +252,11 @@ it. Record every statement in the `REVIEW.md` worksheet.
 
 ## 7.6 Package Godoc (`doc.go`)
 
-- [ ] Replace the placeholder sentence ("Full godoc is deferred to a
+- [x] Replace the placeholder sentence ("Full godoc is deferred to a
   later phase") with a full package doc. Use the `library-docs` skill
-- [ ] Model overview: virtual-time fairness per partition, memoryless
+- [x] Model overview: virtual-time fairness per partition, memoryless
   placement, stamp at enqueue, lease not removal, fenced resolution
-- [ ] Caller obligations, each one sentence with a link to the identifier
+- [x] Caller obligations, each one sentence with a link to the identifier
   that states it in full: `EnsureIndexes` before use; `Reconcile` on a
   ticker; optional `EnsureTTLIndex`; single writer per (tenant,
   partition); weight consistency across producers; acknowledged writes
@@ -264,9 +264,9 @@ it. Record every statement in the `REVIEW.md` worksheet.
   own inserts; simple default collation; no `OmitEmpty`; effects are
   at-least-once (idempotent workers); delayed jobs jump the queue when
   they come due; bounded retries are the worker's job (`Attempts`)
-- [ ] Lifecycle summary: Enqueue → Claim → Heartbeat / Release /
+- [x] Lifecycle summary: Enqueue → Claim → Heartbeat / Release /
   Complete; Cancel; Get
-- [ ] Check rendering with `go doc .` (headings, links)
+- [x] Check rendering with `go doc .` (headings, links)
 
 ---
 
