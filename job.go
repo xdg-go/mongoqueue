@@ -61,8 +61,9 @@ const (
 	ResolutionCanceled Resolution = "canceled"
 )
 
-// Job is the durable record of an enqueued job: the queue-interpreted
-// envelope plus the caller's opaque payload.
+// Job is the durable record of an enqueued job: the library-owned envelope
+// (fields the library writes, and may guard or sort on) plus the payload
+// (the kind discriminator and the caller's opaque body).
 //
 // A Job returned by the library is a detached, read-only snapshot of the
 // stored record. Mutating its fields touches only the in-memory copy and has

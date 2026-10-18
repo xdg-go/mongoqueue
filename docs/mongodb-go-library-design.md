@@ -11,19 +11,22 @@ Alternatives considered and rejected are recorded in
 ## Envelope and payload
 
 Every job's fields fall into two categories, distinguished by **whether the
-queue mechanism interprets them**. Both categories are flat, top-level fields;
-the split is conceptual, not a nesting.
+library owns them**. Both categories are flat, top-level fields; the split is
+conceptual, not a nesting.
 
-- **Envelope** -- fields the queue *interprets*: `JobID`, `TenantID`, `Cost`,
-  `Partition`, `VStamp`, `Liveness`, `Resolution`, `ClaimID`, `VisibleAt`,
-  `Attempts`, `StampedBy`, `ResolvedAt`. Dispatch sorts, claims, fences, and
-  reconciles on these; the queue reads and writes them. (`JobID` is caller-supplied yet envelope: the queue
-  interprets it as the `_id`, the idempotency key, and the vstamp tiebreaker.
-  The category is interpretation, not origin.)
-- **Payload** -- fields the queue stores and returns but never interprets:
+- **Envelope** -- fields the library *owns*: it writes them, and may guard or
+  sort on them. `JobID`, `TenantID`, `Cost`, `Partition`, `VStamp`,
+  `Liveness`, `Resolution`, `ClaimID`, `VisibleAt`, `Attempts`, `StampedBy`,
+  `ResolvedAt`. The caller supplies some as inputs via `EnqueueOpts` (`JobID`,
+  `TenantID`, `Cost`, `Partition`), but the library writes them into the
+  record and gives them their queue meaning. Dispatch sorts, claims, fences,
+  and reconciles on a subset; others (`Resolution`, `StampedBy`,
+  `ResolvedAt`) exist for audit, multi-writer detection, and TTL GC.
+- **Payload** -- fields the queue stores and returns but its core never reads:
   - **`Kind`** -- the caller's decode discriminator, a stable string keyed to the
-    body type. The queue core never reads it; it is the body's *content-type*,
-    used by the caller and the caller-side facade to decode.
+    body type. It is the one library-written payload field: the facade writes
+    it from the binding, but the queue core never reads it; it is the body's
+    *content-type*, used by the caller and the caller-side facade to decode.
   - **`Body`** -- the caller's domain data, stored as a native BSON subdocument.
 
 The queue is a transport: it routes on the envelope and carries the payload
@@ -84,7 +87,7 @@ callers still get typed enqueue and typed decode.
 
 ```go
 type Job struct {
-    // Envelope -- queue-interpreted
+    // Envelope -- library-owned
     ID         string     `bson:"_id"` // caller-supplied job id
     TenantID   string     `bson:"tenant"`
     Partition  string     `bson:"partition"`
