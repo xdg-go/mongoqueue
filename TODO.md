@@ -239,14 +239,14 @@ it. Record every statement in the `REVIEW.md` worksheet.
 
 ## 7.5 Deviation Review
 
-- [ ] Walk `REVIEW.md` deviations with the user one at a time. For each,
+- [x] Walk `REVIEW.md` deviations with the user one at a time. For each,
   record the decision in `REVIEW.md` (fix code / fix doc / accept and
   document / defer)
-- [ ] Apply each decision as its own commit, with a test for any code
+- [x] Apply each decision as its own commit, with a test for any code
   change. Record any rejected alternative in the design doc or
   `docs/rejected-designs.md`, per AGENTS.md
-- [ ] Untested follow-ups from 7.3: write or move to Future Phases
-- [ ] Mark 7.2-7.5 done in `docs/implementation-plan.md`
+- [x] Untested follow-ups from 7.3: write or move to Future Phases
+- [x] Mark 7.2-7.5 done in `docs/implementation-plan.md`
 
 ---
 

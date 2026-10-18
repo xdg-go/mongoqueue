@@ -288,6 +288,8 @@ Done 2026-10-17.
   carry no `resolved_at`; completed and canceled jobs carry a date
 
 ### 7.3 Design-doc reconciliation against the code
+Done 2026-10-18 (TODO 7.2-7.5).
+
 Phases 3-6 changed the design as they went (per-(tenant, partition)
 timelines, lazy-invalidation reconcile, service-clock frontier, partial
 indexes, SCALE 1e3, checked arithmetic). The docs were patched along the
@@ -370,4 +372,19 @@ some gaps will be code bugs.
   if per-timeline re-seed latency shows up in enqueue measurements
 - Backlog reconstruction (LWM + sum of pending strides) instead of trailing
   edge -- revisit only with multi-writer
-- Weight-change transition behavior -- documented, not tested
+- Weight-change transition behavior -- documented; only "affects later
+  stamps only" is tested (`TestWeightChangeAffectsOnlyLaterStamps`)
+
+### Tests (from Phase 7 reconciliation)
+- Explain the actual Claim `findAndModify`, not the equivalent `find`
+  (`TestExplainQueriesUseIndexes` checks the find's plan only)
+- A fenced write that hits a write-concern error returns it wrapped,
+  without inspecting counts (needs a `failCommand` fail point or a replica
+  set)
+- Cancel's "seen pending at the diagnostic read" branch returns
+  `ErrJobResolved` (needs control over interleaving)
+- A trailing-edge re-seed can stamp a new job below one already served:
+  pin a deterministic scenario first
+- Analysis-only invariants: No starvation, Work conservation, Bounded
+  degradation, and the long-job unfairness bound (largest cost times
+  worker count) -- simulation or analysis, not unit tests
