@@ -285,13 +285,13 @@ it. Record every statement in the `REVIEW.md` worksheet.
 
 ## 7.8 README (`README.md`)
 
-- [ ] Use the `library-docs` skill. Badges: pkg.go.dev reference
+- [x] Use the `library-docs` skill. Badges: pkg.go.dev reference
   (`github.com/xdg-go/mongoqueue`), CI status (`.github/workflows/test.yml`),
   Go Report Card, license (Apache-2.0)
-- [ ] One-paragraph pitch (what it is, what it deliberately is not), a
+- [x] One-paragraph pitch (what it is, what it deliberately is not), a
   `go get` line, a pointer to godoc for usage and to `docs/` for design
-- [ ] Brief: no API replay, no usage rules (those are godoc's)
-- [ ] Mark 7.6-7.8 done in `docs/implementation-plan.md`
+- [x] Brief: no API replay, no usage rules (those are godoc's)
+- [x] Mark 7.6-7.8 done in `docs/implementation-plan.md`
 
 ---
 

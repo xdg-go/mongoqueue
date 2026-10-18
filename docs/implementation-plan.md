@@ -332,6 +332,7 @@ some gaps will be code bugs.
   recorded as a follow-up; doc-only fixes need no test
 
 ### 7.4 Documentation
+Done 2026-10-18 (TODO 7.6-7.8).
 - Package godoc: model overview, caller obligations (single-writer,
   weight consistency, index creation, at-least-once effects, delayed jobs jump
   the queue); remove the "Full godoc is deferred" placeholder in `doc.go`
