@@ -272,14 +272,14 @@ it. Record every statement in the `REVIEW.md` worksheet.
 
 ## 7.7 Worker-Pool Example (`example_test.go`)
 
-- [ ] `Example` (package-level): `NewKind[T]`, `Enqueue`, a fixed pool of
+- [x] `Example` (package-level): `NewKind[T]`, `Enqueue`, a fixed pool of
   workers looping `Claim` → `Decode` → work → `Complete`; `ErrNoJob`
   backs off; a heartbeat goroutine for long work; `Release` with a delay
   on transient failure; ctx cancellation for shutdown. No `// Output:`
-- [ ] Keep it short enough to read on pkg.go.dev; split heartbeat or
+- [x] Keep it short enough to read on pkg.go.dev; split heartbeat or
   release into separate `ExampleClaimedJob_Heartbeat` /
   `ExampleClaimedJob_Release` if the main example passes ~60 lines
-- [ ] **Test**: `go vet ./...` compiles the examples
+- [x] **Test**: `go vet ./...` compiles the examples
 
 ---
 
