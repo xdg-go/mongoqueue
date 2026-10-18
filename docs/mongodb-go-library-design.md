@@ -273,9 +273,10 @@ one body type `T` at a single declaration site; the queue stores the string
 without interpreting it. `Decode` asserts the stored `kind` matches the
 binding's, returning `ErrKindMismatch` (wrapped with both kind strings) on
 `kind`↔type drift -- and since every decode reaches the body through a binding,
-the wrong-type-right-string mistake has no call site to happen at. Worker-side
-dispatch switches on the envelope's `Kind` field and calls the matching
-binding's `Decode`.
+the wrong-type-right-string mistake has no call site to happen at. A matching
+record with no body (inserted outside the facade) decodes to `T`'s zero value
+without error. Worker-side dispatch switches on the envelope's `Kind` field and
+calls the matching binding's `Decode`.
 
 Bodies must marshal to a BSON *document*; `bson.Marshal` rejects top-level
 scalars and arrays, and enqueue surfaces that error rather than adding its own

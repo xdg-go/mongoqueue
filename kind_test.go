@@ -2,8 +2,12 @@ package mongoqueue
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/xdg-go/mongoqueue/internal/mongotest"
 )
@@ -152,5 +156,75 @@ func TestKindEnqueueNonDocumentBody(t *testing.T) {
 	}
 	if errors.Is(err, ErrDuplicateJob) || errors.Is(err, ErrMissingJobID) {
 		t.Fatalf("enqueue error = %v, want a marshal error", err)
+	}
+}
+
+// TestKindDecodeNilBody proves a matching-kind job with no body decodes to
+// T's zero value without error, while a kind mismatch still errors first.
+func TestKindDecodeNilBody(t *testing.T) {
+	t.Parallel()
+
+	invoice := NewKind[invoiceBody]("invoice")
+
+	got, err := invoice.Decode(&Job{ID: "j1", Kind: "invoice"})
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got != (invoiceBody{}) {
+		t.Errorf("decode = %+v, want zero value", got)
+	}
+
+	payment := NewKind[paymentBody]("payment")
+	if _, err := payment.Decode(&Job{ID: "j1", Kind: "invoice"}); !errors.Is(err, ErrKindMismatch) {
+		t.Errorf("mismatched nil-body decode error = %v, want ErrKindMismatch", err)
+	}
+}
+
+// TestKindDecodeAbsentBodyRecord proves the nil-body promise end to end: a
+// record inserted outside the facade with no body field is claimable, and
+// Decode yields T's zero value without error.
+func TestKindDecodeAbsentBodyRecord(t *testing.T) {
+	t.Parallel()
+
+	db := mongotest.Connect(t)
+	ctx := opCtx(t)
+	q := New(db.Collection("jobs"))
+	invoice := NewKind[invoiceBody]("invoice")
+
+	// Marshal a full envelope, then drop the body field so the stored
+	// record has no body at all.
+	raw, err := bson.Marshal(Job{
+		ID: "j1", TenantID: "t1", Partition: defaultPartition, Cost: 1,
+		Liveness: LivenessPending, VisibleAt: time.Now().Add(-time.Minute),
+		Kind: "invoice", Body: rawBody(t, bson.D{}),
+	})
+	if err != nil {
+		t.Fatalf("marshal record: %v", err)
+	}
+	var doc bson.D
+	if err := bson.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal record: %v", err)
+	}
+	doc = slices.DeleteFunc(doc, func(e bson.E) bool { return e.Key == "body" })
+	if _, err := q.coll.InsertOne(ctx, doc); err != nil {
+		t.Fatalf("insert record: %v", err)
+	}
+
+	claimed, err := q.Claim(ctx, "", time.Minute)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if claimed == nil || claimed.ID != "j1" {
+		t.Fatalf("claimed = %+v, want j1", claimed)
+	}
+	if claimed.Body != nil {
+		t.Fatalf("claimed body = %v, want absent", claimed.Body)
+	}
+	got, err := invoice.Decode(&claimed.Job)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got != (invoiceBody{}) {
+		t.Errorf("decode = %+v, want zero value", got)
 	}
 }

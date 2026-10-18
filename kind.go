@@ -69,6 +69,9 @@ func (k Kind[T]) Decode(j *Job) (T, error) {
 		return body, fmt.Errorf("mongoqueue: decode job %q: stored kind %q, binding kind %q: %w",
 			j.ID, j.Kind, k.kind, ErrKindMismatch)
 	}
+	if len(j.Body) == 0 {
+		return body, nil
+	}
 	if err := bson.Unmarshal(j.Body, &body); err != nil {
 		return body, fmt.Errorf("mongoqueue: decode job %q body as kind %q: %w", j.ID, k.kind, err)
 	}
