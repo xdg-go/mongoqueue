@@ -12,15 +12,13 @@ import (
 // Heartbeat extends the lease: visible_at becomes server time plus extend.
 // The extension is measured from now, not from the current visible_at, so
 // repeated heartbeats do not stack. A holder whose lease expired but was not
-// reclaimed still holds the fence and may heartbeat.
+// reclaimed still holds its claim and may heartbeat.
 //
 // extend must be positive; extend <= 0 returns ErrInvalidLease before any
 // server round trip. Sub-millisecond extensions round up to one millisecond.
-// If the fence no longer matches (reclaimed, released, canceled, completed,
-// or deleted) Heartbeat returns ErrLeaseLost. Other errors wrap the driver
+// If the job no longer carries this claim's ID (reclaimed, released,
+// canceled, completed, or deleted) Heartbeat returns ErrLeaseLost. Other errors wrap the driver
 // error; a context timeout or network error leaves the outcome unknown.
-//
-// The handle is not updated; call Get for fresh state.
 func (c *ClaimedJob) Heartbeat(ctx context.Context, extend time.Duration) error {
 	if extend <= 0 {
 		return ErrInvalidLease
@@ -31,18 +29,16 @@ func (c *ClaimedJob) Heartbeat(ctx context.Context, extend time.Duration) error 
 }
 
 // Release gives up the claim early: visible_at becomes server time plus
-// delay and the fence is cleared, so the job is reclaimable once delay
+// delay and the claim ID is cleared, so the job is reclaimable once delay
 // elapses (immediately for zero). The next claim increments Attempts and
-// mints a new fence; VStamp is unchanged.
+// assigns a new claim ID; VStamp is unchanged.
 //
 // delay must be non-negative; delay < 0 returns ErrInvalidDelay before any
-// server round trip. If the fence no longer matches Release returns
-// ErrLeaseLost. Release is not success-idempotent: repeating it after a
+// server round trip. If the job no longer carries this claim's ID, Release
+// returns ErrLeaseLost. Release is not success-idempotent: repeating it after a
 // success returns ErrLeaseLost, as does a later Heartbeat or Complete. Other
 // errors wrap the driver error; a context timeout or network error leaves
 // the outcome unknown.
-//
-// The handle is not updated; call Get for fresh state.
 func (c *ClaimedJob) Release(ctx context.Context, delay time.Duration) error {
 	if delay < 0 {
 		return ErrInvalidDelay

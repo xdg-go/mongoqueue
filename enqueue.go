@@ -17,11 +17,9 @@ const defaultPartition = "default"
 
 // EnqueueOpts carries the caller-supplied envelope fields for one enqueue.
 // It is the input counterpart of the Job record: the caller never constructs
-// a Job, and every field the library computes (vstamp, liveness, claim state)
-// has no home here.
-//
-// Envelope fields travel in EnqueueOpts, not inside the body -- the library
-// must read them and is contractually blind to the body.
+// a Job, and fields the library computes (vstamp, liveness, claim state) are
+// not settable here. Envelope fields go here, not in the body, because the
+// library never reads the body.
 //
 // Enqueues for one (tenant, partition) timeline must come from a single
 // writer: one node and, within it, one Queue. Each Queue caches its own copy

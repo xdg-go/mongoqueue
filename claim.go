@@ -12,12 +12,15 @@ import (
 )
 
 // ClaimedJob is the handle a worker receives from Claim: the claimed record
-// plus the fence that authorizes Heartbeat, Release, and Complete.
+// plus the claim ID that authorizes Heartbeat, Release, and Complete. Each
+// claim assigns the job a new random claim ID, and those methods succeed only
+// while the stored job still carries it, so a worker whose job was reclaimed
+// by another worker cannot touch it.
 //
 // The embedded Job is an immutable claim-time snapshot. Later operations do
 // not update it; call Get for fresh state. Mutating its exported fields
 // (including Job.ID and Job.ClaimID) changes nothing server-side and does not
-// affect later operations on the handle, which guard on the job id and fence
+// affect later operations on the handle, which use the job id and claim ID
 // captured privately at claim time. Methods on a ClaimedJob read only that
 // immutable private state and are safe to call concurrently.
 type ClaimedJob struct {
@@ -28,16 +31,15 @@ type ClaimedJob struct {
 	claimID string // the fence minted for this claim; unexported so it cannot be forged
 }
 
-// ClaimID returns the fence minted for this claim: 24 lowercase hex
-// characters, never empty. It is read-only; the handle's guards use the copy
-// captured at claim time, not the exported Job.ClaimID.
+// ClaimID returns the claim ID assigned by this claim: 24 lowercase hex
+// characters, never empty.
 func (c *ClaimedJob) ClaimID() string { return c.claimID }
 
 // Claim leases the visible pending job in partition with the lowest
 // (VStamp, ID) and returns a handle to it. An empty partition means the
 // default partition, as at enqueue.
 //
-// The claim is one atomic server-side write: it mints a new fence, pushes
+// The claim is one atomic server-side write: it assigns a new claim ID, pushes
 // visible_at to server time plus lease, and increments Attempts. Concurrent
 // claimers never receive the same job while its lease is live; an expired
 // lease makes the job claimable again with no sweeper.

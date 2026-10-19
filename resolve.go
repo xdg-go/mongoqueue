@@ -12,17 +12,15 @@ import (
 // Complete resolves the claimed job with r: liveness becomes resolved,
 // Resolution r, and ResolvedAt server time. A resolved job never becomes
 // claimable again. A holder whose lease expired but was not reclaimed still
-// holds the fence and may complete.
+// holds its claim and may complete.
 //
 // r must be non-empty; an empty r returns ErrEmptyResolution before any
-// server round trip. If the fence no longer matches (reclaimed, released,
-// canceled, already completed, or deleted) Complete returns ErrLeaseLost.
+// server round trip. If the job no longer carries this claim's ID
+// (reclaimed, released, canceled, already completed, or deleted) Complete returns ErrLeaseLost.
 // Complete is not success-idempotent: repeating it after a success returns
 // ErrLeaseLost. Other errors wrap the driver error; a context timeout or
 // network error leaves the outcome unknown, and Get can show the current
 // state but cannot prove which call caused it.
-//
-// The handle is not updated; call Get for fresh state.
 func (c *ClaimedJob) Complete(ctx context.Context, r Resolution) error {
 	if r == "" {
 		return ErrEmptyResolution
@@ -31,7 +29,7 @@ func (c *ClaimedJob) Complete(ctx context.Context, r Resolution) error {
 }
 
 // Cancel resolves a pending job with ResolutionCanceled, whether or not it
-// is claimed. It needs no fence and leaves claim_id intact, so a holder's
+// is claimed. It needs no claim ID and leaves claim_id intact, so a holder's
 // next Heartbeat, Release, or Complete returns ErrLeaseLost.
 //
 // An empty jobID returns ErrMissingJobID before any server round trip. If
@@ -44,11 +42,8 @@ func (c *ClaimedJob) Complete(ctx context.Context, r Resolution) error {
 //     the target resolved, was TTL-deleted, and the id was reused, or the
 //     id did not exist yet and a concurrent first enqueue inserted it.
 //
-// ErrJobResolved means the pending-only update matched nothing while a
-// record with that id existed at the read. It does not prove that job (or
-// the record now present) was resolved by anyone in particular, nor that
-// this cancel won; a caller that needs to know inspects Resolution via Get.
-// Other errors wrap the driver error; a context timeout or network error
+// See ErrJobResolved for what that error does and does not prove. Other
+// errors wrap the driver error; a context timeout or network error
 // leaves the outcome unknown.
 func (q *Queue) Cancel(ctx context.Context, jobID string) error {
 	if jobID == "" {

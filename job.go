@@ -11,16 +11,12 @@ import (
 // state -- a claimed job is pending with a live lease, and an expired lease
 // re-enters the visible set with no state transition.
 //
-// Liveness is stored under the BSON field "liveness", always present. Claim,
-// heartbeat, complete, release, and cancel are server-side conditional writes
-// that filter on the pending literal, so the stored value must match the
-// constant exactly.
+// Liveness is stored under the BSON field "liveness", always present, and the
+// stored value matches the constants exactly (e.g. for caller queries).
 type Liveness string
 
 const (
-	// LivenessPending marks a job awaiting or undergoing service. Every
-	// guarded write (claim, heartbeat, complete, release, cancel) filters
-	// on this literal server-side.
+	// LivenessPending marks a job awaiting or undergoing service.
 	LivenessPending Liveness = "pending"
 
 	// LivenessResolved marks a terminal job. Exactly one terminal write
@@ -29,23 +25,17 @@ const (
 	LivenessResolved Liveness = "resolved"
 )
 
-// Resolution records how a job ended. The vocabulary is open: the library
-// provides two canonical values (ResolutionCompleted, ResolutionCanceled) and
-// callers are free to define their own. Resolution is set by the terminal write
-// (Complete or Cancel) and is absent while pending.
+// Resolution records how a job ended. It is set by the terminal write
+// (Complete or Cancel) and is absent while pending. Complete rejects an empty
+// value with ErrEmptyResolution; Cancel writes ResolutionCanceled.
 //
-// There is no ResolutionFailed, because the queue library has no failure/retry
-// concept. A failure the caller intends to retry is a Release (which returns
-// the job to the visible set), not a Complete with a "failed" resolution.
-// Callers are free to define their own "failed" resolution for logging or
-// reporting; the queue library does not interpret it.
+// The vocabulary is open: beyond the two canonical values, callers may define
+// their own, including a "failed" one for reporting, which the library does
+// not interpret. There is no ResolutionFailed because the library has no
+// retry concept: a failure to retry is a Release, not a Complete.
 //
-// Termination requires recording a resolution: Complete rejects an empty
-// value with ErrEmptyResolution, and Cancel writes ResolutionCanceled
-// unconditionally.
-//
-// Keep caller-defined values low-cardinality, stable, and machine-matchable.
-// Human-readable detail (error text, hostnames) does not belong here.
+// Keep caller-defined values low-cardinality, stable, and machine-matchable;
+// human-readable detail (error text, hostnames) does not belong here.
 type Resolution string
 
 const (
@@ -66,11 +56,8 @@ const (
 // (the kind discriminator and the caller's opaque body).
 //
 // A Job returned by the library is a detached, read-only snapshot of the
-// stored record. Mutating its fields touches only the in-memory copy and has
-// no effect on the store -- every guard that matters (claim fencing, liveness
-// transitions) is enforced server-side by conditional writes against durable
-// truth, so a forged value can only make the caller's own write fail the
-// fence. Callers never construct a Job: enqueue input is the separate
+// stored record. Mutating it changes nothing server-side. Callers never
+// construct a Job: enqueue input is the separate
 // EnqueueOpts struct, and the library computes the rest.
 //
 // Fields are exported because the MongoDB Go driver marshals only exported
@@ -97,8 +84,7 @@ type Job struct {
 	// an int64. Workers claim the lowest visible (VStamp, ID) pair.
 	VStamp int64 `bson:"vstamp"`
 
-	// Liveness is the job's lifecycle state, always present; guarded
-	// writes filter on the pending literal server-side.
+	// Liveness is the job's lifecycle state, always present.
 	Liveness Liveness `bson:"liveness"`
 
 	// Resolution records how the job ended, in a caller-defined
@@ -106,8 +92,8 @@ type Job struct {
 	// while pending.
 	Resolution Resolution `bson:"resolution,omitempty"`
 
-	// ClaimID is the fenced claim identifier minted at dispatch. It is
-	// never empty while a claim is live; Release clears it.
+	// ClaimID identifies the current claim; each claim assigns a new one.
+	// It is never empty while a claim is live; Release clears it.
 	ClaimID string `bson:"claim_id"`
 
 	// VisibleAt gates claim eligibility: a pending job is claimable only

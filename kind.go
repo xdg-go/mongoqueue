@@ -8,25 +8,19 @@ import (
 )
 
 // Kind pairs a stable kind string with a body type T. The binding is the
-// single declaration site of the kind↔type contract -- typically a
-// package-level var -- so enqueue and decode cannot drift apart: the binding
-// is the only writer of the stored kind string, and every decode reaches the
-// body through a binding, so the wrong-type-right-string mistake has no call
-// site to happen at. The queue stores the kind string without interpreting
-// it; it is the body's content-type, read only by Decode and by worker-side
-// dispatch.
+// single place that pairs a kind name with a body type; declare it once,
+// typically as a package-level var, and use it for both Enqueue and Decode.
+// The queue stores the kind string without interpreting it; it is the body's
+// content-type, read only by Decode and by worker-side dispatch.
 //
-// One Queue carries unlimited heterogeneous kinds over the shared fairness
-// timeline; generics live only here, at the API boundary, and the queue core
-// stays non-generic.
+// One Queue carries many kinds over the shared fairness timeline.
 type Kind[T any] struct {
 	kind string
 }
 
 // NewKind returns the binding of kind to body type T. It panics on an empty
 // kind: a binding is declared once at init time, so an empty kind is a
-// programmer error surfaced immediately, per the regexp.MustCompile
-// precedent.
+// programmer error surfaced immediately.
 func NewKind[T any](kind string) Kind[T] {
 	if kind == "" {
 		panic("mongoqueue: NewKind called with empty kind")

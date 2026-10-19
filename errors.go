@@ -21,8 +21,8 @@ var ErrNoJob = errors.New("mongoqueue: no claimable job")
 var ErrJobNotFound = errors.New("mongoqueue: job not found")
 
 // ErrLeaseLost signals that a claim is no longer held. Returned by
-// Heartbeat, Release, and Complete on any acknowledged fence miss: the job
-// was reclaimed by another worker, released, canceled, already completed, or
+// Heartbeat, Release, and Complete when the job no longer carries this
+// claim's claim ID: the job was reclaimed by another worker, released, canceled, already completed, or
 // deleted. A worker that needs to tell these apart calls Get and reads the
 // record.
 var ErrLeaseLost = errors.New("mongoqueue: lease lost")
@@ -50,8 +50,7 @@ var ErrInvalidDelay = errors.New("mongoqueue: delay must be >= 0")
 // ErrVTimeOverflow signals an enqueue whose virtual timestamp would exceed
 // int64: the cost is too large to scale, or the (tenant, partition)
 // timeline has exhausted its virtual clock. Nothing is inserted. The
-// fixed-point budget is sized to be out of reach (see the design docs);
-// hitting it means costs are expressed in units far finer than the budget
+// fixed-point budget is sized to be out of reach; hitting it means costs are expressed in units far finer than the budget
 // assumes.
 var ErrVTimeOverflow = errors.New("mongoqueue: virtual time overflow")
 

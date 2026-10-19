@@ -50,10 +50,10 @@ func WithNodeID(id string) Option {
 // By default the queue mints a node id of the form hostname-pid-<random hex>;
 // pass WithNodeID to override it.
 //
-// Lease fencing relies on acknowledged writes: the queue never inspects or
+// Claim checks rely on acknowledged writes: the queue never inspects or
 // overrides coll's write concern, so that choice is the caller's. An
-// unacknowledged write concern (w: 0) breaks fencing, because a fence miss
-// cannot be observed. Single resolution across a failover requires
+// unacknowledged write concern (w: 0) breaks them, because the queue cannot
+// see that a write matched no job. Single resolution across a failover requires
 // w: "majority"; a w: 1 write can roll back, letting a second resolution win.
 //
 // The queue also requires coll's default collation to be simple (binary): a
@@ -243,33 +243,19 @@ func randomHex() string {
 //     partition) timeline's maximum pending vstamp.
 //   - clock {partition: 1, vstamp: -1}, partial on {claim_id: {$gt: ""}},
 //     serves the frontier's service clock, the maximum vstamp among a
-//     partition's fenced (claimed, unreleased) jobs.
+//     partition's claimed, unreleased jobs.
 //
-// Each index is partial so it holds only the jobs its queries can match:
-// resolved jobs leave the claim and seed indexes, and never-claimed or
-// released jobs stay out of the clock index. The predicate in the partial
-// filter therefore leaves the keys. MongoDB uses a partial index only when
-// the query filter literally implies the partial filter, so every query these
-// indexes serve keeps liveness: "pending" or claim_id: {$gt: ""} as a literal
-// predicate.
-//
-// Partiality costs no extra index writes over a job's lifecycle (7, the same
-// as two full indexes): enqueue inserts 2 entries; the first claim rewrites
-// the claim entry and inserts the clock entry; resolution deletes the claim
-// and seed entries; TTL removal deletes the clock entry. A reclaim leaves the
-// clock entry alone (its keys do not change); Release deletes it and the next
-// claim re-adds it.
+// Each index is partial, so it holds only the jobs its queries can match.
 //
 // Indexes are named, so re-calling EnsureIndexes with identical specifications
 // is a server-side no-op and returns no error. The names mongoqueue_claim,
 // mongoqueue_seed, and mongoqueue_clock are reserved on the collection.
 // Indexes from earlier versions of this library are not dropped: the
 // auto-named partition_1_liveness_1_vstamp_1__id_1_visible_at_1_claim_id_1 and
-// tenant_1_partition_1_liveness_1_vstamp_-1 add write cost without serving any
-// query, and the operator can drop them. Index creation is never automatic; the
-// caller invokes this deliberately because runtime credentials often lack
-// createIndex and index builds on a populated collection are a scheduled
-// operational event.
+// tenant_1_partition_1_liveness_1_vstamp_-1 serve no query, and the operator
+// can safely drop them. Index creation is never automatic, because runtime
+// credentials often lack createIndex and index builds on a populated
+// collection are a scheduled operational event.
 func (q *Queue) EnsureIndexes(ctx context.Context) error {
 	pending := bson.D{{Key: "liveness", Value: LivenessPending}}
 	claimed := bson.D{{Key: "claim_id", Value: bson.D{{Key: "$gt", Value: ""}}}}
@@ -322,10 +308,9 @@ const ttlIndexName = "mongoqueue_ttl"
 // delete a pending or claimed job, whatever fields that job carries.
 //
 // There is no default retention and no TTL index unless the caller invokes
-// this: TTL is destructive policy, kept separate from the required claim index
-// so a caller can create the latter without the former.
+// this.
 //
-// Re-calling with the same retention is a no-op. Re-calling with a *different*
+// Re-calling with the same retention is a no-op. Re-calling with a different
 // retention returns the driver's index-conflict error rather than silently
 // dropping and recreating the index; the caller resolves the change with a
 // collMod command against expireAfterSeconds.
@@ -336,10 +321,9 @@ const ttlIndexName = "mongoqueue_ttl"
 // job the instant it resolves. Rather than create that silent-data-loss index,
 // EnsureTTLIndex rejects an out-of-range retention before any server round trip.
 //
-// The dispatch frontier reads resolved jobs' stamps (the service clock), so a
-// very short retention can drop the clock back to the min-pending fallback
-// once all claimed history is removed; retention should comfortably exceed
-// the time between claims in a partition.
+// Keep retention well above the time between claims in a partition: the
+// dispatch frontier reads resolved jobs' stamps, and a retention short enough
+// to remove them all degrades where new tenants join.
 func (q *Queue) EnsureTTLIndex(ctx context.Context, retention time.Duration) error {
 	seconds := int64(retention / time.Second)
 	if seconds < 1 || seconds > math.MaxInt32 {
@@ -358,31 +342,37 @@ func (q *Queue) EnsureTTLIndex(ctx context.Context, retention time.Duration) err
 	return nil
 }
 
-// Reconcile bounds how far this node's cached virtual times can drift from
-// the stored jobs. Callers must run it periodically, typically on a ticker;
-// the interval is the staleness bound. Each call refreshes the dispatch
-// frontier of every partition in this node's cache, marks every
-// (tenant, partition) timeline used since the previous call so that its next
-// enqueue re-reads its position from the database, and evicts timelines left
-// unused for two consecutive calls (so an idle timeline is dropped within two
-// intervals).
+// Reconcile brings this Queue's in-memory fairness state back in line with
+// the jobs stored in the database. Callers must run it periodically for the
+// life of the Queue, typically on a ticker (see the example). Every 10 to 60
+// seconds suits most workloads; 30 seconds is a reasonable default.
 //
-// After each call, every marked timeline re-seeds before its next stamp,
-// which picks up stamps written by other producers and reclaims virtual time
-// from canceled jobs at the end of a tenant's backlog. New tenants, and
-// tenants whose timelines were evicted, are placed at the partition's
-// frontier even without Reconcile, because a timeline's first enqueue
-// refreshes that frontier itself. Drift in active timelines, however, is only
-// corrected by Reconcile.
+// To avoid a database read on every enqueue, a Queue keeps each tenant's
+// virtual clock (one per tenant and partition) in memory. A clock that is in
+// use can fall out of step with the stored jobs:
 //
-// Every partition's refresh is attempted; failures are joined into the
-// returned error, and the walk (marking and eviction) runs regardless, so one
-// failing partition cannot stall drift correction or eviction for the rest.
-// Marking a timeline whose partition failed to refresh is safe: its re-seed
-// uses the frontier stored by an earlier refresh. Once ctx is done the
-// remaining refreshes are skipped; a ctx already done on entry skips the walk
-// too. Retrying on the next tick is sufficient. Reconcile is safe to call
-// concurrently with itself and with all other Queue methods.
+//   - A tenant whose backlog was fully served keeps an old clock, so its next
+//     jobs sort ahead of work other tenants have been waiting on.
+//   - Canceling a tenant's most recently enqueued jobs leaves its clock
+//     counting them, so its later jobs sort further back than they should.
+//   - Another writer enqueuing for the same tenant and partition (against the
+//     single-writer requirement in [EnqueueOpts], or briefly while enqueuing
+//     moves between nodes) advances the stored jobs but not this Queue's
+//     clock.
+//
+// Each call makes every clock used since the previous call re-read its
+// position from the database at its next enqueue, so an error lasts at most
+// about one interval. A shorter interval keeps fairness tighter at the cost
+// of more reads: each call does one or two indexed reads per partition with a
+// clock in memory, and each clock used during the interval does one
+// more at its next enqueue. Clocks unused for two consecutive calls are
+// dropped from memory. A new tenant, or one whose clock was dropped, starts
+// in the right place without Reconcile.
+//
+// Failures from individual partitions are joined into the returned error;
+// the other partitions still proceed. Retrying on the next tick is
+// sufficient. Reconcile is safe to call concurrently with itself and with all
+// other Queue methods.
 func (q *Queue) Reconcile(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("mongoqueue: reconcile: %w", err)

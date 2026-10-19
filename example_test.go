@@ -30,7 +30,7 @@ var resizeKind = mongoqueue.NewKind[Resize]("resize")
 // must be idempotent.
 func resize(_ context.Context, _ Resize) error { return nil }
 
-// queue stands for a Queue set up as in Example.
+// queue stands for a Queue set up as in the package example.
 var queue *mongoqueue.Queue
 
 // A worker pool: enqueue a job, then run a fixed set of workers that claim,
@@ -48,11 +48,11 @@ func Example() {
 	if err := q.EnsureIndexes(ctx); err != nil {
 		log.Fatal(err)
 	}
-	// Run q.Reconcile on a ticker for the life of the queue; see
-	// ExampleQueue_Reconcile.
+	// Run q.Reconcile on a ticker for the life of the queue; see the
+	// Queue.Reconcile example.
 
 	// One binding pairs the kind name with its body type for both Enqueue
-	// and Decode. Resize is a struct with bson tags.
+	// and Decode.
 	resizeKind := mongoqueue.NewKind[Resize]("resize")
 	// The job id is the idempotency key: a duplicate is already enqueued.
 	err = resizeKind.Enqueue(ctx, q, Resize{URL: "s3://img/1.png", Width: 640},
@@ -64,6 +64,7 @@ func Example() {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt)
 	defer stop()
 
+	const idleBackoff = time.Second
 	var wg sync.WaitGroup
 	for range 4 {
 		wg.Go(func() {
@@ -73,9 +74,9 @@ func Example() {
 					if !errors.Is(err, mongoqueue.ErrNoJob) {
 						log.Printf("claim: %v", err)
 					}
-					select { // Back off when idle or failing.
+					select { // Wait before polling again, or stop at shutdown.
 					case <-ctx.Done():
-					case <-time.After(time.Second):
+					case <-time.After(idleBackoff):
 					}
 					continue
 				}
@@ -102,8 +103,8 @@ func Example() {
 
 // Long work keeps its lease alive with a heartbeat goroutine and stops when
 // the lease is lost, since another worker may then hold the job. queue
-// and resizeKind are set up as in Example; resize is the caller's
-// (idempotent) work.
+// and resizeKind are set up as in the package example; resize is the
+// caller's (idempotent) work.
 func ExampleClaimedJob_Heartbeat() {
 	ctx := context.Background()
 	job, err := queue.Claim(ctx, "", 30*time.Second)
@@ -149,8 +150,8 @@ func ExampleClaimedJob_Heartbeat() {
 // A transient failure releases the job to be retried after a delay. The
 // queue never caps retries, so the worker gives up itself once Attempts
 // reaches its limit, recording a caller-defined resolution. queue and
-// resizeKind are set up as in Example; resize is the caller's (idempotent)
-// work.
+// resizeKind are set up as in the package example; resize is the caller's
+// (idempotent) work.
 func ExampleClaimedJob_Release() {
 	ctx := context.Background()
 	job, err := queue.Claim(ctx, "", 30*time.Second)
@@ -182,13 +183,13 @@ func ExampleClaimedJob_Release() {
 // Run Reconcile on a ticker for the life of the queue. A failed call is
 // logged and retried on the next tick.
 func ExampleQueue_Reconcile() {
-	q := queue // set up as in Example
+	q := queue // set up as in the package example
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go func() {
-		ticker := time.NewTicker(time.Minute)
+		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {

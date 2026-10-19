@@ -249,7 +249,11 @@ human-meaningful id.
 **Vtime cache and `Reconcile`.** Reconciliation is caller-driven: one
 exported method, `func (q *Queue) Reconcile(ctx context.Context) error`, that
 the caller runs on its own ticker. There is no internal goroutine, no `Close`,
-and no interval option, so `New` stays free of I/O and goroutines. `Reconcile`
+and no interval option, so `New` stays free of I/O and goroutines. The
+recommended interval is 10 to 60 seconds, with 30 seconds as a default: the
+interval bounds how long cache drift lasts, and each call costs one or two
+covered reads per cached partition plus one seed read at the next enqueue of
+each timeline marked stale. `Reconcile`
 refreshes the dispatch frontier of every partition in the cache, then walks
 the cache: an entry used since the previous call is marked stale and re-seeds
 on its next enqueue; an entry unused since then is evicted. A failed

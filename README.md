@@ -17,16 +17,10 @@ retry, dead-letter, or orchestrate workflows; those belong to the caller.
 go get github.com/xdg-go/mongoqueue
 ```
 
-## Documentation
+## Design
 
-Usage, caller obligations, and examples are in the
-[package documentation](https://pkg.go.dev/github.com/xdg-go/mongoqueue).
-
-The design is in [`docs/`](docs/):
-[fair-job-queue-design.md](docs/fair-job-queue-design.md) covers the
-storage-agnostic scheduling model, and
-[mongodb-go-library-design.md](docs/mongodb-go-library-design.md) covers the
-Go API and MongoDB storage.
+Design documents are in the repository's
+[`docs/`](https://github.com/xdg-go/mongoqueue/tree/main/docs) directory.
 
 ## License
 
